@@ -2,9 +2,12 @@ import { useState } from 'react'
 import { useStore } from '../store'
 import { useVersionCheck } from '../hooks/useVersionCheck'
 import HelpModal from './HelpModal'
+import { logout } from '../lib/backend'
 
 export default function Header() {
   const setShowSettings = useStore((s) => s.setShowSettings)
+  const setCurrentUser = useStore((s) => s.setCurrentUser)
+  const currentUser = useStore((s) => s.currentUser)
   const { hasUpdate, latestRelease, dismiss } = useVersionCheck()
   const [showHelp, setShowHelp] = useState(false)
 
@@ -36,6 +39,9 @@ export default function Header() {
           )}
         </div>
         <div className="flex items-center gap-1">
+          <span className="hidden sm:inline text-xs text-gray-500 mr-2">
+            {currentUser?.username} · 剩余额度 {currentUser?.quotaRemaining ?? 0}
+          </span>
           <button
             onClick={() => setShowHelp(true)}
             className="p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-900 transition-colors"
@@ -79,6 +85,13 @@ export default function Header() {
                 d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"
               />
             </svg>
+          </button>
+          <button
+            onClick={async () => { await logout(); setCurrentUser(null) }}
+            className="p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-900 transition-colors text-xs text-gray-500"
+            title="退出登录"
+          >
+            退出
           </button>
         </div>
       </div>
