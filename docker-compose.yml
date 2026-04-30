@@ -1,0 +1,12 @@
+services:
+  gpt-image-playground:
+    image: ghcr.io/lingyenbird/gpt_image_playground_distribution:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: gpt-image-playground
+    ports:
+      - "58946:8080"
+    volumes:
+      - ./data:/data
+    restart: unless-stopped

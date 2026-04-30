@@ -1,0 +1,101 @@
+version: '3'
+
+vars:
+  IMAGE: ghcr.io/lingyenbird/gpt_image_playground_distribution
+  TAG: latest
+  SERVICE: gpt-image-playground
+  DOCKER_WORKFLOW: docker.yml
+  GITHUB_REPO: LingyeNBird/gpt_image_playground_distribution
+
+tasks:
+  default:
+    desc: List available tasks
+    cmds:
+      - task --list
+
+  deps:
+    desc: Install frontend dependencies
+    cmds:
+      - npm ci
+
+  test:
+    desc: Run frontend and Go backend tests
+    cmds:
+      - npm test
+      - cmd: go test ./...
+        dir: server
+
+  build:frontend:
+    desc: Build frontend assets locally
+    cmds:
+      - npm run build
+
+  build:backend:
+    desc: Build Go backend binary locally
+    cmds:
+      - cmd: go build -o ../bin/gip-server .
+        dir: server
+
+  docker:build-local:
+    desc: Optional local Docker build for debugging only
+    cmds:
+      - docker build -t {{.IMAGE}}:{{.TAG}} .
+
+  docker:publish:
+    desc: Trigger GitHub Actions to build and push Docker image to GHCR
+    cmds:
+      - gh workflow run {{.DOCKER_WORKFLOW}} --repo {{.GITHUB_REPO}} --ref main
+      - gh run list --repo {{.GITHUB_REPO}} --workflow {{.DOCKER_WORKFLOW}} --limit 1
+
+  docker:publish-watch:
+    desc: Trigger GitHub Actions Docker build and watch the run
+    cmds:
+      - gh workflow run {{.DOCKER_WORKFLOW}} --repo {{.GITHUB_REPO}} --ref main
+      - powershell -NoProfile -Command "Start-Sleep -Seconds 5"
+      - gh run watch --repo {{.GITHUB_REPO}} $(gh run list --repo {{.GITHUB_REPO}} --workflow {{.DOCKER_WORKFLOW}} --limit 1 --json databaseId --jq '.[0].databaseId')
+
+  up:
+    desc: Build locally and start/recreate Compose service
+    cmds:
+      - docker compose up -d --build
+
+  pull:
+    desc: Pull latest image from GHCR
+    cmds:
+      - docker compose pull
+
+  redeploy:
+    desc: Pull latest image from GHCR and recreate Compose service
+    cmds:
+      - docker compose pull
+      - docker compose up -d
+
+  restart:
+    desc: Restart Compose service
+    cmds:
+      - docker compose restart
+
+  down:
+    desc: Stop and remove Compose service (keeps ./data)
+    cmds:
+      - docker compose down
+
+  logs:
+    desc: Follow service logs
+    cmds:
+      - docker compose logs -f {{.SERVICE}}
+
+  ps:
+    desc: Show Compose status
+    cmds:
+      - docker compose ps
+
+  admin-key:
+    desc: Show initial admin key from container logs if still present
+    cmds:
+      - powershell -NoProfile -Command "docker logs {{.SERVICE}} 2>&1 | Select-String 'initial admin key'"
+
+  clean:image:
+    desc: Remove local Docker image
+    cmds:
+      - docker image rm {{.IMAGE}}:{{.TAG}}
