@@ -7,6 +7,7 @@ import type {
   MaskDraft,
   TaskRecord,
   ExportData,
+  CurrentUser,
 } from './types'
 import { DEFAULT_SETTINGS, DEFAULT_PARAMS } from './types'
 import {
@@ -22,7 +23,7 @@ import {
   storeImage,
   hashDataUrl,
 } from './lib/db'
-import { callImageApi } from './lib/api'
+import { backendTaskToResult, fetchBackendTask, getCurrentUser, submitBackendTask } from './lib/backend'
 import { validateMaskMatchesImage } from './lib/canvasImage'
 import { orderInputImagesForMask } from './lib/mask'
 import { normalizeImageSize } from './lib/size'
@@ -39,6 +40,14 @@ export function getCachedImage(id: string): string | undefined {
 
 export async function ensureImageCached(id: string): Promise<string | undefined> {
   if (imageCache.has(id)) return imageCache.get(id)
+  if (id.startsWith('url-')) {
+    const task = useStore.getState().tasks.find((t) => t.outputImageUrls?.[id])
+    const url = task?.outputImageUrls?.[id]
+    if (url) {
+      imageCache.set(id, url)
+      return url
+    }
+  }
   const rec = await getImage(id)
   if (rec) {
     imageCache.set(id, rec.dataUrl)
@@ -60,6 +69,10 @@ function orderImagesWithMaskFirst(images: InputImage[], maskTargetImageId: strin
 // ===== Store 类型 =====
 
 interface AppState {
+  currentUser: CurrentUser | null
+  setCurrentUser: (user: CurrentUser | null) => void
+  authChecked: boolean
+  setAuthChecked: (checked: boolean) => void
   // 设置
   settings: AppSettings
   setSettings: (s: Partial<AppSettings>) => void
@@ -136,6 +149,10 @@ export const useStore = create<AppState>()(
   persist(
     (set, get) => ({
       // Settings
+      currentUser: null,
+      setCurrentUser: (currentUser) => set({ currentUser }),
+      authChecked: false,
+      setAuthChecked: (authChecked) => set({ authChecked }),
       settings: { ...DEFAULT_SETTINGS },
       setSettings: (s) => set((st) => ({
         settings: {
@@ -320,6 +337,15 @@ function normalizeParamsForSettings(params: TaskParams, settings: AppSettings): 
 
 /** 初始化：从 IndexedDB 加载任务和图片缓存，清理孤立图片 */
 export async function initStore() {
+  try {
+    const user = await getCurrentUser()
+    useStore.getState().setCurrentUser(user)
+  } catch {
+    useStore.getState().setCurrentUser(null)
+  } finally {
+    useStore.getState().setAuthChecked(true)
+  }
+
   const tasks = await getAllTasks()
   useStore.getState().setTasks(tasks)
 
@@ -346,12 +372,6 @@ export async function initStore() {
 export async function submitTask(options: { allowFullMask?: boolean } = {}) {
   const { settings, prompt, inputImages, maskDraft, params, showToast, setConfirmDialog } =
     useStore.getState()
-
-  if (!settings.apiKey) {
-    showToast('请先在设置中配置 API Key', 'error')
-    useStore.getState().setShowSettings(true)
-    return
-  }
 
   if (!prompt.trim()) {
     showToast('请输入提示词', 'error')
@@ -390,6 +410,22 @@ export async function submitTask(options: { allowFullMask?: boolean } = {}) {
     }
   }
 
+  const { currentUser } = useStore.getState()
+  if (!currentUser || currentUser.role !== 'user') {
+    showToast('请先登录普通用户账号', 'error')
+    return
+  }
+
+  if (settings.deliveryMode === 'direct' && currentUser.allowDirect === false) {
+    showToast('管理员未为你开启直传模式', 'error')
+    return
+  }
+
+  if (settings.deliveryMode === 'bucket' && currentUser.allowBucket === false) {
+    showToast('管理员未为你开启存储桶模式', 'error')
+    return
+  }
+
   // 持久化输入图片到 IndexedDB（此前只在内存缓存中）
   for (const img of orderedInputImages) {
     await storeImage(img.dataUrl)
@@ -409,6 +445,8 @@ export async function submitTask(options: { allowFullMask?: boolean } = {}) {
     maskTargetImageId,
     maskImageId,
     outputImages: [],
+    outputImageUrls: {},
+    deliveryMode: settings.deliveryMode,
     status: 'running',
     error: null,
     createdAt: Date.now(),
@@ -443,7 +481,7 @@ async function executeTask(taskId: string) {
       if (!maskDataUrl) throw new Error('遮罩图片已不存在')
     }
 
-    const result = await callImageApi({
+    const backendTask = await submitBackendTask({
       settings,
       prompt: task.prompt,
       params: task.params,
@@ -451,11 +489,33 @@ async function executeTask(taskId: string) {
       maskDataUrl,
     })
 
+    updateTaskInStore(taskId, { backendTaskId: backendTask.id })
+
+    let latestBackendTask = backendTask
+    while (latestBackendTask.status === 'running') {
+      await new Promise((resolve) => setTimeout(resolve, 1500))
+      latestBackendTask = await fetchBackendTask(backendTask.id)
+    }
+
+    if (latestBackendTask.status === 'error') {
+      throw new Error(latestBackendTask.error || '生成失败')
+    }
+
+    const result = backendTaskToResult(latestBackendTask)
+
     // 存储输出图片
     const outputIds: string[] = []
+    const outputImageUrls: Record<string, string> = {}
     for (const dataUrl of result.images) {
-      const imgId = await storeImage(dataUrl, 'generated')
-      imageCache.set(imgId, dataUrl)
+      let imgId: string
+      if (/^https?:\/\//i.test(dataUrl)) {
+        imgId = `url-${await hashDataUrl(dataUrl)}`
+        imageCache.set(imgId, dataUrl)
+        outputImageUrls[imgId] = dataUrl
+      } else {
+        imgId = await storeImage(dataUrl, 'generated')
+        imageCache.set(imgId, dataUrl)
+      }
       outputIds.push(imgId)
     }
     const actualParamsByImage = result.actualParamsList?.reduce<Record<string, Partial<TaskParams>>>((acc, params, index) => {
@@ -483,6 +543,7 @@ async function executeTask(taskId: string) {
     // 更新任务
     updateTaskInStore(taskId, {
       outputImages: outputIds,
+      outputImageUrls,
       actualParams: { ...result.actualParams, n: outputIds.length },
       actualParamsByImage: actualParamsByImage && Object.keys(actualParamsByImage).length > 0 ? actualParamsByImage : undefined,
       revisedPromptByImage: revisedPromptByImage && Object.keys(revisedPromptByImage).length > 0 ? revisedPromptByImage : undefined,
