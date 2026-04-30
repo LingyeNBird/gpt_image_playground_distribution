@@ -15,9 +15,13 @@ import ConfirmDialog from './components/ConfirmDialog'
 import Toast from './components/Toast'
 import MaskEditorModal from './components/MaskEditorModal'
 import ImageContextMenu from './components/ImageContextMenu'
+import LoginPage from './components/LoginPage'
+import AdminPanel from './components/AdminPanel'
 
 export default function App() {
   const setSettings = useStore((s) => s.setSettings)
+  const currentUser = useStore((s) => s.currentUser)
+  const authChecked = useStore((s) => s.authChecked)
   useDockerApiUrlMigrationNotice()
 
   useEffect(() => {
@@ -70,6 +74,14 @@ export default function App() {
     document.addEventListener('dragstart', preventPageImageDrag)
     return () => document.removeEventListener('dragstart', preventPageImageDrag)
   }, [])
+
+  if (!authChecked) {
+    return <div className="min-h-screen grid place-items-center text-gray-400">加载中...</div>
+  }
+
+  if (!currentUser) return <LoginPage />
+
+  if (currentUser.role === 'admin') return <AdminPanel />
 
   return (
     <>

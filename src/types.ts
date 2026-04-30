@@ -12,6 +12,7 @@ export interface AppSettings {
   apiMode: ApiMode
   codexCli: boolean
   apiProxy: boolean
+  deliveryMode: 'direct' | 'bucket'
 }
 
 const DEFAULT_BASE_URL = readRuntimeEnv(import.meta.env.VITE_DEFAULT_API_URL) || 'https://api.openai.com/v1'
@@ -26,6 +27,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   apiMode: 'images',
   codexCli: false,
   apiProxy: false,
+  deliveryMode: 'direct',
 }
 
 // ===== 任务参数 =====
@@ -83,6 +85,9 @@ export interface TaskRecord {
   maskImageId?: string | null
   /** 输出图片的 image store id 列表 */
   outputImages: string[]
+  outputImageUrls?: Record<string, string>
+  backendTaskId?: string
+  deliveryMode?: 'direct' | 'bucket'
   status: TaskStatus
   error: string | null
   createdAt: number
@@ -91,6 +96,17 @@ export interface TaskRecord {
   elapsed: number | null
   /** 是否收藏 */
   isFavorite?: boolean
+}
+
+export interface CurrentUser {
+  id: string
+  username: string
+  role: 'user' | 'admin'
+  quotaTotal?: number
+  quotaUsed?: number
+  quotaRemaining?: number
+  allowDirect?: boolean
+  allowBucket?: boolean
 }
 
 // ===== IndexedDB 存储的图片 =====
