@@ -12,7 +12,12 @@ WORKDIR /src/server
 COPY server/go.mod server/go.sum ./
 RUN go mod download
 COPY server/ ./
-RUN CGO_ENABLED=0 GOOS=linux go build -o /out/gip-server .
+COPY VERSION.backend VERSION.frontend /src/
+RUN BACKEND_VERSION=$(tr -d '[:space:]' < /src/VERSION.backend) \
+  && FRONTEND_VERSION=$(tr -d '[:space:]' < /src/VERSION.frontend) \
+  && CGO_ENABLED=0 GOOS=linux go build \
+    -ldflags "-s -w -X main.backendVersion=${BACKEND_VERSION} -X main.frontendVersion=${FRONTEND_VERSION}" \
+    -o /out/gip-server .
 
 # ---- Runtime ----
 FROM alpine:3.20

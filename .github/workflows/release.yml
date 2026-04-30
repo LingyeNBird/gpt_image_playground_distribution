@@ -1,0 +1,110 @@
+name: Build Release Assets
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            ext: ''
+          - goos: linux
+            goarch: arm64
+            ext: ''
+          - goos: windows
+            goarch: amd64
+            ext: '.exe'
+          - goos: darwin
+            goarch: amd64
+            ext: ''
+          - goos: darwin
+            goarch: arm64
+            ext: ''
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+      - id: versions
+        shell: bash
+        run: |
+          echo "backend=$(tr -d '[:space:]' < VERSION.backend)" >> "$GITHUB_OUTPUT"
+          echo "frontend=$(tr -d '[:space:]' < VERSION.frontend)" >> "$GITHUB_OUTPUT"
+      - name: Build backend
+        shell: bash
+        run: |
+          mkdir -p release
+          cd server
+          GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} CGO_ENABLED=0 go build \
+            -ldflags "-s -w -X main.backendVersion=${{ steps.versions.outputs.backend }} -X main.frontendVersion=${{ steps.versions.outputs.frontend }}" \
+            -o ../release/gip-server${{ matrix.ext }} .
+          cd ../release
+          zip "gip-server_${{ steps.versions.outputs.backend }}_${{ matrix.goos }}_${{ matrix.goarch }}.zip" gip-server${{ matrix.ext }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: backend-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: release/gip-server_${{ steps.versions.outputs.backend }}_${{ matrix.goos }}_${{ matrix.goarch }}.zip
+
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+      - id: versions
+        shell: bash
+        run: |
+          echo "frontend=$(tr -d '[:space:]' < VERSION.frontend)" >> "$GITHUB_OUTPUT"
+      - run: npm ci
+      - run: npm run build
+      - name: Package frontend
+        shell: bash
+        run: |
+          cd dist
+          zip -r ../frontend-dist_${{ steps.versions.outputs.frontend }}.zip .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend-dist_${{ steps.versions.outputs.frontend }}.zip
+
+  publish:
+    runs-on: ubuntu-latest
+    needs: [release, frontend]
+    steps:
+      - uses: actions/checkout@v4
+      - id: versions
+        shell: bash
+        run: |
+          echo "backend=$(tr -d '[:space:]' < VERSION.backend)" >> "$GITHUB_OUTPUT"
+          echo "frontend=$(tr -d '[:space:]' < VERSION.frontend)" >> "$GITHUB_OUTPUT"
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Prepare release assets
+        shell: bash
+        run: |
+          mkdir -p release-assets
+          find artifacts -type f -name '*.zip' -exec cp {} release-assets/ \;
+          printf '%s\n' "${{ steps.versions.outputs.backend }}" > release-assets/backend-version.txt
+          printf '%s\n' "${{ steps.versions.outputs.frontend }}" > release-assets/frontend-version.txt
+          cd release-assets
+          sha256sum * > checksums.txt
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: release-backend-${{ steps.versions.outputs.backend }}-frontend-${{ steps.versions.outputs.frontend }}
+          name: Backend ${{ steps.versions.outputs.backend }} / Frontend ${{ steps.versions.outputs.frontend }}
+          files: release-assets/*
+          make_latest: true

@@ -5,6 +5,7 @@ vars:
   TAG: latest
   SERVICE: gpt-image-playground
   DOCKER_WORKFLOW: docker.yml
+  RELEASE_WORKFLOW: release.yml
   GITHUB_REPO: LingyeNBird/gpt_image_playground_distribution
 
 tasks:
@@ -53,6 +54,19 @@ tasks:
       - gh workflow run {{.DOCKER_WORKFLOW}} --repo {{.GITHUB_REPO}} --ref main
       - powershell -NoProfile -Command "Start-Sleep -Seconds 5"
       - gh run watch --repo {{.GITHUB_REPO}} $(gh run list --repo {{.GITHUB_REPO}} --workflow {{.DOCKER_WORKFLOW}} --limit 1 --json databaseId --jq '.[0].databaseId')
+
+  release:publish:
+    desc: Trigger GitHub Actions to build release binaries and frontend assets
+    cmds:
+      - gh workflow run {{.RELEASE_WORKFLOW}} --repo {{.GITHUB_REPO}} --ref main
+      - gh run list --repo {{.GITHUB_REPO}} --workflow {{.RELEASE_WORKFLOW}} --limit 1
+
+  release:publish-watch:
+    desc: Trigger release asset build and watch the GitHub Actions run
+    cmds:
+      - gh workflow run {{.RELEASE_WORKFLOW}} --repo {{.GITHUB_REPO}} --ref main
+      - powershell -NoProfile -Command "Start-Sleep -Seconds 5"
+      - gh run watch --repo {{.GITHUB_REPO}} $(gh run list --repo {{.GITHUB_REPO}} --workflow {{.RELEASE_WORKFLOW}} --limit 1 --json databaseId --jq '.[0].databaseId')
 
   up:
     desc: Build locally and start/recreate Compose service
