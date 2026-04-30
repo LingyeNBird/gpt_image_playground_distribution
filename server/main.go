@@ -1,0 +1,1232 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"log"
+	"mime"
+	"mime/multipart"
+	"net/http"
+	"net/textproto"
+	"net/url"
+	"os"
+	"path/filepath"
+	"regexp"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/tencentyun/cos-go-sdk-v5"
+)
+
+const (
+	cookieName      = "gip_session"
+	defaultDataDir  = "/data"
+	defaultBindAddr = ":8080"
+)
+
+type Server struct {
+	dataDir   string
+	staticDir string
+	store     *Store
+	sessions  *SessionStore
+	adminKey  string
+}
+
+type Store struct {
+	mu      sync.Mutex
+	dataDir string
+	state   AppState
+}
+
+type AppState struct {
+	Users       map[string]*User           `json:"users"`
+	Settings    AdminSettings              `json:"settings"`
+	Buckets     map[string]*BucketConfig   `json:"buckets"`
+	Tasks       map[string]*GenerationTask `json:"tasks"`
+	FailureLogs []FailureLog               `json:"failureLogs"`
+}
+
+type User struct {
+	ID           string `json:"id"`
+	Username     string `json:"username"`
+	PasswordHash string `json:"passwordHash"`
+	Disabled     bool   `json:"disabled"`
+	Banned       bool   `json:"banned"`
+	QuotaTotal   int    `json:"quotaTotal"`
+	QuotaUsed    int    `json:"quotaUsed"`
+	AllowDirect  bool   `json:"allowDirect"`
+	AllowBucket  bool   `json:"allowBucket"`
+	CreatedAt    int64  `json:"createdAt"`
+	LastSeenAt   int64  `json:"lastSeenAt"`
+}
+
+type AdminSettings struct {
+	BaseURL  string `json:"baseUrl"`
+	APIKey   string `json:"apiKey"`
+	Model    string `json:"model"`
+	Timeout  int    `json:"timeout"`
+	APIMode  string `json:"apiMode"`
+	CodexCLI bool   `json:"codexCli"`
+}
+
+type BucketConfig struct {
+	ID             string `json:"id"`
+	Name           string `json:"name"`
+	BucketURL      string `json:"bucketUrl"`
+	SecretID       string `json:"secretId"`
+	SecretKey      string `json:"secretKey"`
+	PathPrefix     string `json:"pathPrefix"`
+	TempURLMinutes int    `json:"tempUrlMinutes"`
+	CreatedAt      int64  `json:"createdAt"`
+}
+
+type GenerationTask struct {
+	ID               string           `json:"id"`
+	UserID           string           `json:"userId"`
+	Username         string           `json:"username"`
+	Prompt           string           `json:"prompt"`
+	Params           map[string]any   `json:"params"`
+	Mode             string           `json:"mode"`
+	Status           string           `json:"status"`
+	Error            string           `json:"error,omitempty"`
+	Images           []GeneratedImage `json:"images,omitempty"`
+	ActualParams     map[string]any   `json:"actualParams,omitempty"`
+	ActualParamsList []map[string]any `json:"actualParamsList,omitempty"`
+	RevisedPrompts   []string         `json:"revisedPrompts,omitempty"`
+	CreatedAt        int64            `json:"createdAt"`
+	FinishedAt       int64            `json:"finishedAt,omitempty"`
+	Elapsed          int64            `json:"elapsed,omitempty"`
+}
+
+type GeneratedImage struct {
+	DataURL   string `json:"dataUrl,omitempty"`
+	URL       string `json:"url,omitempty"`
+	ObjectKey string `json:"objectKey,omitempty"`
+}
+
+type FailureLog struct {
+	ID        string `json:"id"`
+	UserID    string `json:"userId"`
+	Username  string `json:"username"`
+	TaskID    string `json:"taskId"`
+	Prompt    string `json:"prompt"`
+	Error     string `json:"error"`
+	CreatedAt int64  `json:"createdAt"`
+}
+
+type Session struct {
+	ID         string
+	UserID     string
+	Username   string
+	Role       string
+	LastSeenAt int64
+}
+
+type SessionStore struct {
+	mu    sync.Mutex
+	items map[string]*Session
+}
+
+type publicUser struct {
+	ID             string `json:"id"`
+	Username       string `json:"username"`
+	Disabled       bool   `json:"disabled"`
+	Banned         bool   `json:"banned"`
+	QuotaTotal     int    `json:"quotaTotal"`
+	QuotaUsed      int    `json:"quotaUsed"`
+	QuotaRemaining int    `json:"quotaRemaining"`
+	AllowDirect    bool   `json:"allowDirect"`
+	AllowBucket    bool   `json:"allowBucket"`
+	CreatedAt      int64  `json:"createdAt"`
+	LastSeenAt     int64  `json:"lastSeenAt"`
+	Online         bool   `json:"online"`
+	RunningTasks   int    `json:"runningTasks"`
+}
+
+func main() {
+	dataDir := getenv("DATA_DIR", defaultDataDir)
+	staticDir := getenv("STATIC_DIR", "./dist")
+	addr := getenv("ADDR", defaultBindAddr)
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		log.Fatal(err)
+	}
+	adminKey, err := ensureAdminKey(dataDir)
+	if err != nil {
+		log.Fatal(err)
+	}
+	store, err := NewStore(dataDir)
+	if err != nil {
+		log.Fatal(err)
+	}
+	s := &Server{dataDir: dataDir, staticDir: staticDir, store: store, sessions: &SessionStore{items: map[string]*Session{}}, adminKey: adminKey}
+	mux := http.NewServeMux()
+	s.routes(mux)
+	log.Printf("gpt-image-playground listening on %s", addr)
+	log.Fatal(http.ListenAndServe(addr, mux))
+}
+
+func (s *Server) routes(mux *http.ServeMux) {
+	mux.HandleFunc("/api/auth/register", s.handleRegister)
+	mux.HandleFunc("/api/auth/login", s.handleLogin)
+	mux.HandleFunc("/api/auth/logout", s.handleLogout)
+	mux.HandleFunc("/api/auth/me", s.handleMe)
+	mux.HandleFunc("/api/generate", s.requireUser(s.handleGenerate))
+	mux.HandleFunc("/api/tasks", s.requireUser(s.handleTasks))
+	mux.HandleFunc("/api/tasks/", s.requireUser(s.handleTaskByID))
+	mux.HandleFunc("/api/admin/settings", s.requireAdmin(s.handleAdminSettings))
+	mux.HandleFunc("/api/admin/users", s.requireAdmin(s.handleAdminUsers))
+	mux.HandleFunc("/api/admin/users/", s.requireAdmin(s.handleAdminUserByID))
+	mux.HandleFunc("/api/admin/buckets", s.requireAdmin(s.handleAdminBuckets))
+	mux.HandleFunc("/api/admin/failures", s.requireAdmin(s.handleAdminFailures))
+	mux.HandleFunc("/", s.handleStatic)
+}
+
+func NewStore(dataDir string) (*Store, error) {
+	st := &Store{dataDir: dataDir}
+	if err := st.load(); err != nil {
+		return nil, err
+	}
+	return st, nil
+}
+
+func (st *Store) load() error {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	st.state = AppState{Users: map[string]*User{}, Buckets: map[string]*BucketConfig{}, Tasks: map[string]*GenerationTask{}, Settings: AdminSettings{BaseURL: "https://api.openai.com/v1", Model: "gpt-image-2", Timeout: 300, APIMode: "images"}}
+	path := filepath.Join(st.dataDir, "state.json")
+	b, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return st.saveLocked()
+	}
+	if err != nil {
+		return err
+	}
+	if len(bytes.TrimSpace(b)) == 0 {
+		return st.saveLocked()
+	}
+	if err := json.Unmarshal(b, &st.state); err != nil {
+		return err
+	}
+	if st.state.Users == nil {
+		st.state.Users = map[string]*User{}
+	}
+	if st.state.Buckets == nil {
+		st.state.Buckets = map[string]*BucketConfig{}
+	}
+	if st.state.Tasks == nil {
+		st.state.Tasks = map[string]*GenerationTask{}
+	}
+	if st.state.Settings.Timeout == 0 {
+		st.state.Settings.Timeout = 300
+	}
+	if st.state.Settings.BaseURL == "" {
+		st.state.Settings.BaseURL = "https://api.openai.com/v1"
+	}
+	if st.state.Settings.Model == "" {
+		st.state.Settings.Model = "gpt-image-2"
+	}
+	if st.state.Settings.APIMode == "" {
+		st.state.Settings.APIMode = "images"
+	}
+	return nil
+}
+
+func (st *Store) saveLocked() error {
+	b, err := json.MarshalIndent(st.state, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmp := filepath.Join(st.dataDir, "state.json.tmp")
+	path := filepath.Join(st.dataDir, "state.json")
+	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+func (st *Store) with(fn func(*AppState) error) error {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if err := fn(&st.state); err != nil {
+		return err
+	}
+	return st.saveLocked()
+}
+
+func (st *Store) snapshot() AppState {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	b, _ := json.Marshal(st.state)
+	var cp AppState
+	_ = json.Unmarshal(b, &cp)
+	return cp
+}
+
+func (ss *SessionStore) create(userID, username, role string) *Session {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+	s := &Session{ID: randomHex(32), UserID: userID, Username: username, Role: role, LastSeenAt: nowMs()}
+	ss.items[s.ID] = s
+	return s
+}
+
+func (ss *SessionStore) get(id string) (*Session, bool) {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+	s, ok := ss.items[id]
+	if !ok {
+		return nil, false
+	}
+	s.LastSeenAt = nowMs()
+	return s, true
+}
+
+func (ss *SessionStore) delete(id string) { ss.mu.Lock(); delete(ss.items, id); ss.mu.Unlock() }
+func (ss *SessionStore) onlineUserIDs() map[string]bool {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+	cutoff := nowMs() - int64((5*time.Minute)/time.Millisecond)
+	m := map[string]bool{}
+	for id, sess := range ss.items {
+		if sess.LastSeenAt < cutoff {
+			delete(ss.items, id)
+			continue
+		}
+		if sess.Role == "user" {
+			m[sess.UserID] = true
+		}
+	}
+	return m
+}
+
+func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w)
+		return
+	}
+	var req struct{ Username, Password string }
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	req.Username = strings.TrimSpace(req.Username)
+	if !validUsername(req.Username) || len(req.Password) < 4 {
+		httpError(w, 400, "用户名格式不正确或密码太短")
+		return
+	}
+	var user *User
+	err := s.store.with(func(st *AppState) error {
+		for _, u := range st.Users {
+			if strings.EqualFold(u.Username, req.Username) {
+				return errors.New("用户名已存在")
+			}
+		}
+		user = &User{ID: randomHex(12), Username: req.Username, PasswordHash: hashPassword(req.Password), QuotaTotal: 0, AllowDirect: true, AllowBucket: false, CreatedAt: nowMs(), LastSeenAt: nowMs()}
+		st.Users[user.ID] = user
+		return nil
+	})
+	if err != nil {
+		httpError(w, 400, err.Error())
+		return
+	}
+	sess := s.sessions.create(user.ID, user.Username, "user")
+	setSessionCookie(w, sess.ID)
+	writeJSON(w, map[string]any{"user": s.publicCurrentUser(user, "user")})
+}
+
+func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w)
+		return
+	}
+	var req struct{ Username, Password, AdminKey, Role string }
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	req.Role = strings.TrimSpace(req.Role)
+	if req.Role == "admin" {
+		if !hmac.Equal([]byte(req.AdminKey), []byte(s.adminKey)) {
+			httpError(w, 401, "管理员密钥不正确")
+			return
+		}
+		sess := s.sessions.create("admin", "管理员", "admin")
+		setSessionCookie(w, sess.ID)
+		writeJSON(w, map[string]any{"user": map[string]any{"id": "admin", "username": "管理员", "role": "admin"}})
+		return
+	}
+	var user *User
+	state := s.store.snapshot()
+	for _, u := range state.Users {
+		if strings.EqualFold(u.Username, strings.TrimSpace(req.Username)) {
+			user = u
+			break
+		}
+	}
+	if user == nil || !checkPassword(req.Password, user.PasswordHash) {
+		httpError(w, 401, "账号或密码错误")
+		return
+	}
+	if user.Disabled || user.Banned {
+		httpError(w, 403, "账号已被禁用或封禁")
+		return
+	}
+	_ = s.store.with(func(st *AppState) error {
+		if u := st.Users[user.ID]; u != nil {
+			u.LastSeenAt = nowMs()
+		}
+		return nil
+	})
+	sess := s.sessions.create(user.ID, user.Username, "user")
+	setSessionCookie(w, sess.ID)
+	writeJSON(w, map[string]any{"user": s.publicCurrentUser(user, "user")})
+}
+
+func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
+	if c, err := r.Cookie(cookieName); err == nil {
+		s.sessions.delete(c.Value)
+	}
+	http.SetCookie(w, &http.Cookie{Name: cookieName, Value: "", Path: "/", MaxAge: -1, HttpOnly: true, SameSite: http.SameSiteLaxMode})
+	writeJSON(w, map[string]bool{"ok": true})
+}
+
+func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
+	sess, ok := s.sessionFromRequest(r)
+	if !ok {
+		writeJSON(w, map[string]any{"user": nil})
+		return
+	}
+	if sess.Role == "admin" {
+		writeJSON(w, map[string]any{"user": map[string]any{"id": "admin", "username": "管理员", "role": "admin"}})
+		return
+	}
+	state := s.store.snapshot()
+	u := state.Users[sess.UserID]
+	if u == nil || u.Disabled || u.Banned {
+		httpError(w, 401, "登录已失效")
+		return
+	}
+	writeJSON(w, map[string]any{"user": s.publicCurrentUser(u, "user")})
+}
+
+func (s *Server) handleGenerate(w http.ResponseWriter, r *http.Request, sess *Session) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w)
+		return
+	}
+	var req struct {
+		Prompt             string         `json:"prompt"`
+		Params             map[string]any `json:"params"`
+		InputImageDataURLs []string       `json:"inputImageDataUrls"`
+		MaskDataURL        string         `json:"maskDataUrl"`
+		Mode               string         `json:"mode"`
+	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if strings.TrimSpace(req.Prompt) == "" {
+		httpError(w, 400, "请输入提示词")
+		return
+	}
+	state := s.store.snapshot()
+	user := state.Users[sess.UserID]
+	if user == nil || user.Disabled || user.Banned {
+		httpError(w, 403, "账号不可用")
+		return
+	}
+	mode := req.Mode
+	if mode != "bucket" {
+		mode = "direct"
+	}
+	if mode == "direct" && !user.AllowDirect {
+		httpError(w, 403, "未开启直传模式")
+		return
+	}
+	if mode == "bucket" && !user.AllowBucket {
+		httpError(w, 403, "未开启存储桶模式")
+		return
+	}
+	if user.QuotaTotal <= user.QuotaUsed {
+		httpError(w, 403, "生图额度不足")
+		return
+	}
+	settings := state.Settings
+	if settings.APIKey == "" {
+		httpError(w, 500, "管理员尚未配置上游 API Key")
+		return
+	}
+	task := &GenerationTask{ID: randomHex(12), UserID: user.ID, Username: user.Username, Prompt: strings.TrimSpace(req.Prompt), Params: req.Params, Mode: mode, Status: "running", CreatedAt: nowMs()}
+	if err := s.store.with(func(st *AppState) error { st.Tasks[task.ID] = task; return nil }); err != nil {
+		httpError(w, 500, err.Error())
+		return
+	}
+	go s.executeGeneration(task.ID, settings, req.InputImageDataURLs, req.MaskDataURL)
+	writeJSON(w, task)
+}
+
+func (s *Server) handleTasks(w http.ResponseWriter, r *http.Request, sess *Session) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	state := s.store.snapshot()
+	var tasks []*GenerationTask
+	for _, t := range state.Tasks {
+		if t.UserID == sess.UserID {
+			tasks = append(tasks, sanitizeTaskForUser(t))
+		}
+	}
+	sort.Slice(tasks, func(i, j int) bool { return tasks[i].CreatedAt > tasks[j].CreatedAt })
+	writeJSON(w, map[string]any{"tasks": tasks})
+}
+
+func (s *Server) handleTaskByID(w http.ResponseWriter, r *http.Request, sess *Session) {
+	id := strings.TrimPrefix(r.URL.Path, "/api/tasks/")
+	state := s.store.snapshot()
+	t := state.Tasks[id]
+	if t == nil || t.UserID != sess.UserID {
+		http.NotFound(w, r)
+		return
+	}
+	writeJSON(w, sanitizeTaskForUser(t))
+}
+
+func (s *Server) handleAdminSettings(w http.ResponseWriter, r *http.Request, sess *Session) {
+	switch r.Method {
+	case http.MethodGet:
+		settings := s.store.snapshot().Settings
+		settings.APIKey = maskSecret(settings.APIKey)
+		writeJSON(w, settings)
+	case http.MethodPut:
+		var req AdminSettings
+		if !decodeJSON(w, r, &req) {
+			return
+		}
+		err := s.store.with(func(st *AppState) error {
+			if req.APIKey == "********" {
+				req.APIKey = st.Settings.APIKey
+			}
+			if req.Timeout == 0 {
+				req.Timeout = 300
+			}
+			st.Settings = req
+			return nil
+		})
+		if err != nil {
+			httpError(w, 500, err.Error())
+			return
+		}
+		writeJSON(w, map[string]bool{"ok": true})
+	default:
+		methodNotAllowed(w)
+	}
+}
+
+func (s *Server) handleAdminUsers(w http.ResponseWriter, r *http.Request, sess *Session) {
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, map[string]any{"users": s.adminUsers()})
+	case http.MethodPost:
+		var req struct {
+			Username, Password string
+			QuotaTotal         int
+		}
+		if !decodeJSON(w, r, &req) {
+			return
+		}
+		err := s.store.with(func(st *AppState) error {
+			for _, u := range st.Users {
+				if strings.EqualFold(u.Username, req.Username) {
+					return errors.New("用户名已存在")
+				}
+			}
+			id := randomHex(12)
+			st.Users[id] = &User{ID: id, Username: req.Username, PasswordHash: hashPassword(req.Password), QuotaTotal: req.QuotaTotal, AllowDirect: true, CreatedAt: nowMs(), LastSeenAt: nowMs()}
+			return nil
+		})
+		if err != nil {
+			httpError(w, 400, err.Error())
+			return
+		}
+		writeJSON(w, map[string]bool{"ok": true})
+	default:
+		methodNotAllowed(w)
+	}
+}
+
+func (s *Server) handleAdminUserByID(w http.ResponseWriter, r *http.Request, sess *Session) {
+	id := strings.TrimPrefix(r.URL.Path, "/api/admin/users/")
+	if r.Method != http.MethodPatch {
+		methodNotAllowed(w)
+		return
+	}
+	var req struct {
+		Disabled, Banned         *bool
+		QuotaTotal               *int
+		AllowDirect, AllowBucket *bool
+	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	err := s.store.with(func(st *AppState) error {
+		u := st.Users[id]
+		if u == nil {
+			return errors.New("用户不存在")
+		}
+		if req.Disabled != nil {
+			u.Disabled = *req.Disabled
+		}
+		if req.Banned != nil {
+			u.Banned = *req.Banned
+		}
+		if req.QuotaTotal != nil {
+			u.QuotaTotal = *req.QuotaTotal
+		}
+		if req.AllowDirect != nil {
+			u.AllowDirect = *req.AllowDirect
+		}
+		if req.AllowBucket != nil {
+			u.AllowBucket = *req.AllowBucket
+		}
+		if !u.AllowDirect && !u.AllowBucket {
+			return errors.New("至少开启一种分发模式")
+		}
+		return nil
+	})
+	if err != nil {
+		httpError(w, 400, err.Error())
+		return
+	}
+	writeJSON(w, map[string]bool{"ok": true})
+}
+
+func (s *Server) handleAdminBuckets(w http.ResponseWriter, r *http.Request, sess *Session) {
+	switch r.Method {
+	case http.MethodGet:
+		state := s.store.snapshot()
+		out := []map[string]any{}
+		for _, b := range state.Buckets {
+			out = append(out, map[string]any{"id": b.ID, "name": b.Name, "bucketUrl": b.BucketURL, "pathPrefix": b.PathPrefix, "tempUrlMinutes": b.TempURLMinutes, "imageCount": s.countBucketImages(b), "createdAt": b.CreatedAt})
+		}
+		writeJSON(w, map[string]any{"buckets": out})
+	case http.MethodPost:
+		var req BucketConfig
+		if !decodeJSON(w, r, &req) {
+			return
+		}
+		if req.BucketURL == "" || req.SecretID == "" || req.SecretKey == "" {
+			httpError(w, 400, "请填写 COS Bucket URL、SecretId、SecretKey")
+			return
+		}
+		if req.TempURLMinutes <= 0 {
+			req.TempURLMinutes = 60
+		}
+		err := s.store.with(func(st *AppState) error {
+			req.ID = randomHex(12)
+			req.CreatedAt = nowMs()
+			if req.Name == "" {
+				req.Name = req.BucketURL
+			}
+			st.Buckets[req.ID] = &req
+			return nil
+		})
+		if err != nil {
+			httpError(w, 500, err.Error())
+			return
+		}
+		writeJSON(w, map[string]bool{"ok": true})
+	default:
+		methodNotAllowed(w)
+	}
+}
+
+func (s *Server) handleAdminFailures(w http.ResponseWriter, r *http.Request, sess *Session) {
+	state := s.store.snapshot()
+	writeJSON(w, map[string]any{"failures": state.FailureLogs})
+}
+
+func (s *Server) executeGeneration(taskID string, settings AdminSettings, inputImages []string, maskDataURL string) {
+	started := nowMs()
+	state := s.store.snapshot()
+	task := state.Tasks[taskID]
+	if task == nil {
+		return
+	}
+	images, actual, actualList, revised, err := s.callUpstream(settings, task, inputImages, maskDataURL)
+	if err != nil {
+		clean := sanitizeError(err.Error(), settings.BaseURL)
+		_ = s.store.with(func(st *AppState) error {
+			t := st.Tasks[taskID]
+			if t == nil {
+				return nil
+			}
+			t.Status = "error"
+			t.Error = clean
+			t.FinishedAt = nowMs()
+			t.Elapsed = t.FinishedAt - started
+			st.FailureLogs = append([]FailureLog{{ID: randomHex(12), UserID: t.UserID, Username: t.Username, TaskID: t.ID, Prompt: t.Prompt, Error: sanitizeError(err.Error(), ""), CreatedAt: nowMs()}}, st.FailureLogs...)
+			if len(st.FailureLogs) > 500 {
+				st.FailureLogs = st.FailureLogs[:500]
+			}
+			return nil
+		})
+		return
+	}
+	state = s.store.snapshot()
+	task = state.Tasks[taskID]
+	generated := []GeneratedImage{}
+	if task.Mode == "bucket" {
+		bucket := firstBucket(state.Buckets)
+		if bucket == nil {
+			s.executeGenerationFailure(taskID, started, "管理员尚未配置存储桶")
+			return
+		}
+		for i, dataURL := range images {
+			url, key, upErr := s.uploadToCOS(bucket, taskID, i, dataURL)
+			if upErr != nil {
+				s.executeGenerationFailure(taskID, started, upErr.Error())
+				return
+			}
+			generated = append(generated, GeneratedImage{URL: url, ObjectKey: key})
+		}
+	} else {
+		for _, dataURL := range images {
+			generated = append(generated, GeneratedImage{DataURL: dataURL})
+		}
+	}
+	_ = s.store.with(func(st *AppState) error {
+		t := st.Tasks[taskID]
+		if t == nil {
+			return nil
+		}
+		t.Status = "done"
+		t.Images = generated
+		t.ActualParams = actual
+		t.ActualParamsList = actualList
+		t.RevisedPrompts = revised
+		t.FinishedAt = nowMs()
+		t.Elapsed = t.FinishedAt - started
+		if u := st.Users[t.UserID]; u != nil {
+			u.QuotaUsed += len(generated)
+		}
+		return nil
+	})
+}
+
+func (s *Server) executeGenerationFailure(taskID string, started int64, msg string) {
+	_ = s.store.with(func(st *AppState) error {
+		if t := st.Tasks[taskID]; t != nil {
+			t.Status = "error"
+			t.Error = msg
+			t.FinishedAt = nowMs()
+			t.Elapsed = t.FinishedAt - started
+			st.FailureLogs = append([]FailureLog{{ID: randomHex(12), UserID: t.UserID, Username: t.Username, TaskID: t.ID, Prompt: t.Prompt, Error: msg, CreatedAt: nowMs()}}, st.FailureLogs...)
+		}
+		return nil
+	})
+}
+
+func (s *Server) callUpstream(settings AdminSettings, task *GenerationTask, inputImages []string, maskDataURL string) ([]string, map[string]any, []map[string]any, []string, error) {
+	if settings.APIMode == "responses" {
+		return nil, nil, nil, nil, errors.New("后端 Responses API 代理暂未实现，请在管理员设置中使用 Images API")
+	}
+	base := strings.TrimRight(settings.BaseURL, "/")
+	endpoint := base + "/images/generations"
+	var body io.Reader
+	headers := map[string]string{"Authorization": "Bearer " + settings.APIKey, "Cache-Control": "no-store", "Pragma": "no-cache"}
+	if len(inputImages) > 0 {
+		endpoint = base + "/images/edits"
+		buf := &bytes.Buffer{}
+		mw := multipart.NewWriter(buf)
+		writeFormField(mw, "model", settings.Model)
+		writeFormField(mw, "prompt", task.Prompt)
+		for k, v := range task.Params {
+			if k != "n" || toInt(v) > 1 {
+				writeFormField(mw, k, fmt.Sprint(v))
+			}
+		}
+		for i, dataURL := range inputImages {
+			addDataURLFile(mw, "image[]", fmt.Sprintf("input-%d.png", i+1), dataURL)
+		}
+		if maskDataURL != "" {
+			addDataURLFile(mw, "mask", "mask.png", maskDataURL)
+		}
+		_ = mw.Close()
+		body = buf
+		headers["Content-Type"] = mw.FormDataContentType()
+	} else {
+		payload := map[string]any{"model": settings.Model, "prompt": task.Prompt}
+		for k, v := range task.Params {
+			if k == "output_compression" && v == nil {
+				continue
+			}
+			payload[k] = v
+		}
+		b, _ := json.Marshal(payload)
+		body = bytes.NewReader(b)
+		headers["Content-Type"] = "application/json"
+	}
+	client := http.Client{Timeout: time.Duration(settings.Timeout) * time.Second}
+	req, _ := http.NewRequest(http.MethodPost, endpoint, body)
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, nil, nil, nil, err
+	}
+	defer resp.Body.Close()
+	rb, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, nil, nil, nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(rb))
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(rb, &payload); err != nil {
+		return nil, nil, nil, nil, err
+	}
+	arr, _ := payload["data"].([]any)
+	if len(arr) == 0 {
+		return nil, nil, nil, nil, errors.New("接口未返回图片数据")
+	}
+	mimeType := "image/png"
+	if f, _ := task.Params["output_format"].(string); f != "" {
+		mimeType = "image/" + f
+	}
+	images := []string{}
+	revised := []string{}
+	for _, item := range arr {
+		m, _ := item.(map[string]any)
+		if b64, _ := m["b64_json"].(string); b64 != "" {
+			images = append(images, "data:"+mimeType+";base64,"+b64)
+		} else if u, _ := m["url"].(string); u != "" {
+			du, err := downloadAsDataURL(u, mimeType)
+			if err != nil {
+				return nil, nil, nil, nil, err
+			}
+			images = append(images, du)
+		}
+		rp, _ := m["revised_prompt"].(string)
+		revised = append(revised, rp)
+	}
+	return images, pickActual(payload), nil, revised, nil
+}
+
+func (s *Server) uploadToCOS(b *BucketConfig, taskID string, idx int, dataURL string) (string, string, error) {
+	u, err := url.Parse(b.BucketURL)
+	if err != nil {
+		return "", "", err
+	}
+	client := cos.NewClient(&cos.BaseURL{BucketURL: u}, &http.Client{Transport: &cos.AuthorizationTransport{SecretID: b.SecretID, SecretKey: b.SecretKey}})
+	mimeType, raw, err := parseDataURL(dataURL)
+	if err != nil {
+		return "", "", err
+	}
+	exts, _ := mime.ExtensionsByType(mimeType)
+	ext := ".png"
+	if len(exts) > 0 {
+		ext = exts[0]
+	}
+	prefix := strings.Trim(strings.TrimSpace(b.PathPrefix), "/")
+	key := fmt.Sprintf("%s/%s-%d%s", prefix, taskID, idx+1, ext)
+	key = strings.TrimPrefix(key, "/")
+	_, err = client.Object.Put(contextTODO(), key, bytes.NewReader(raw), &cos.ObjectPutOptions{ObjectPutHeaderOptions: &cos.ObjectPutHeaderOptions{ContentType: mimeType}})
+	if err != nil {
+		return "", "", err
+	}
+	expire := time.Duration(b.TempURLMinutes) * time.Minute
+	if expire <= 0 {
+		expire = time.Hour
+	}
+	presigned, err := client.Object.GetPresignedURL(contextTODO(), http.MethodGet, key, b.SecretID, b.SecretKey, expire, nil)
+	if err != nil {
+		return "", "", err
+	}
+	return presigned.String(), key, nil
+}
+
+func contextTODO() context.Context { return context.Background() }
+
+func getenv(key, fallback string) string {
+	if value := strings.TrimSpace(os.Getenv(key)); value != "" {
+		return value
+	}
+	return fallback
+}
+
+func nowMs() int64 { return time.Now().UnixMilli() }
+
+func randomHex(n int) string {
+	b := make([]byte, n)
+	if _, err := rand.Read(b); err != nil {
+		panic(err)
+	}
+	return hex.EncodeToString(b)
+}
+
+func validUsername(v string) bool {
+	return regexp.MustCompile(`^[a-zA-Z0-9_\-.]{3,32}$`).MatchString(v)
+}
+
+func hashPassword(password string) string {
+	salt := randomHex(16)
+	mac := hmac.New(sha256.New, []byte(salt))
+	mac.Write([]byte(password))
+	return salt + ":" + hex.EncodeToString(mac.Sum(nil))
+}
+
+func checkPassword(password, stored string) bool {
+	parts := strings.Split(stored, ":")
+	if len(parts) != 2 {
+		return false
+	}
+	mac := hmac.New(sha256.New, []byte(parts[0]))
+	mac.Write([]byte(password))
+	return hmac.Equal([]byte(hex.EncodeToString(mac.Sum(nil))), []byte(parts[1]))
+}
+
+func ensureAdminKey(dataDir string) (string, error) {
+	masterPath := filepath.Join(dataDir, "server.key")
+	master, err := os.ReadFile(masterPath)
+	if errors.Is(err, os.ErrNotExist) {
+		key := make([]byte, 32)
+		if _, err := rand.Read(key); err != nil {
+			return "", err
+		}
+		master = []byte(base64.StdEncoding.EncodeToString(key))
+		if err := os.WriteFile(masterPath, master, 0o600); err != nil {
+			return "", err
+		}
+	} else if err != nil {
+		return "", err
+	}
+	adminPath := filepath.Join(dataDir, "admin-key.enc")
+	blob, err := os.ReadFile(adminPath)
+	if errors.Is(err, os.ErrNotExist) {
+		plain := randomHex(18)
+		enc, err := encryptString(strings.TrimSpace(string(master)), plain)
+		if err != nil {
+			return "", err
+		}
+		if err := os.WriteFile(adminPath, []byte(enc), 0o600); err != nil {
+			return "", err
+		}
+		log.Printf("IMPORTANT: initial admin key: %s", plain)
+		log.Printf("IMPORTANT: encrypted admin key saved to %s; keep ./data mounted to persist it", adminPath)
+		return plain, nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return decryptString(strings.TrimSpace(string(master)), strings.TrimSpace(string(blob)))
+}
+
+func encryptString(master, plain string) (string, error) {
+	key, err := base64.StdEncoding.DecodeString(master)
+	if err != nil {
+		return "", err
+	}
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return "", err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", err
+	}
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		return "", err
+	}
+	out := append(nonce, gcm.Seal(nil, nonce, []byte(plain), nil)...)
+	return base64.StdEncoding.EncodeToString(out), nil
+}
+
+func decryptString(master, enc string) (string, error) {
+	key, err := base64.StdEncoding.DecodeString(master)
+	if err != nil {
+		return "", err
+	}
+	raw, err := base64.StdEncoding.DecodeString(enc)
+	if err != nil {
+		return "", err
+	}
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return "", err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", err
+	}
+	if len(raw) < gcm.NonceSize() {
+		return "", errors.New("invalid admin key file")
+	}
+	nonce, data := raw[:gcm.NonceSize()], raw[gcm.NonceSize():]
+	plain, err := gcm.Open(nil, nonce, data, nil)
+	if err != nil {
+		return "", err
+	}
+	return string(plain), nil
+}
+
+func writeJSON(w http.ResponseWriter, v any) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+func decodeJSON(w http.ResponseWriter, r *http.Request, v any) bool {
+	defer r.Body.Close()
+	if err := json.NewDecoder(io.LimitReader(r.Body, 600<<20)).Decode(v); err != nil {
+		httpError(w, 400, "请求 JSON 无效")
+		return false
+	}
+	return true
+}
+
+func httpError(w http.ResponseWriter, code int, message string) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(code)
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": message})
+}
+
+func methodNotAllowed(w http.ResponseWriter) {
+	httpError(w, http.StatusMethodNotAllowed, "method not allowed")
+}
+
+func setSessionCookie(w http.ResponseWriter, sid string) {
+	http.SetCookie(w, &http.Cookie{Name: cookieName, Value: sid, Path: "/", MaxAge: 86400 * 30, HttpOnly: true, SameSite: http.SameSiteLaxMode})
+}
+
+func (s *Server) sessionFromRequest(r *http.Request) (*Session, bool) {
+	c, err := r.Cookie(cookieName)
+	if err != nil || c.Value == "" {
+		return nil, false
+	}
+	return s.sessions.get(c.Value)
+}
+
+func (s *Server) requireUser(next func(http.ResponseWriter, *http.Request, *Session)) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		sess, ok := s.sessionFromRequest(r)
+		if !ok {
+			httpError(w, 401, "请先登录")
+			return
+		}
+		if sess.Role == "admin" {
+			httpError(w, 403, "管理员不能执行用户生成任务")
+			return
+		}
+		next(w, r, sess)
+	}
+}
+
+func (s *Server) requireAdmin(next func(http.ResponseWriter, *http.Request, *Session)) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		sess, ok := s.sessionFromRequest(r)
+		if !ok || sess.Role != "admin" {
+			httpError(w, 403, "需要管理员登录")
+			return
+		}
+		next(w, r, sess)
+	}
+}
+
+func (s *Server) publicCurrentUser(u *User, role string) map[string]any {
+	return map[string]any{"id": u.ID, "username": u.Username, "role": role, "quotaTotal": u.QuotaTotal, "quotaUsed": u.QuotaUsed, "quotaRemaining": max(0, u.QuotaTotal-u.QuotaUsed), "allowDirect": u.AllowDirect, "allowBucket": u.AllowBucket}
+}
+
+func (s *Server) adminUsers() []publicUser {
+	state := s.store.snapshot()
+	online := s.sessions.onlineUserIDs()
+	running := map[string]int{}
+	for _, t := range state.Tasks {
+		if t.Status == "running" {
+			running[t.UserID]++
+		}
+	}
+	users := []publicUser{}
+	for _, u := range state.Users {
+		users = append(users, publicUser{ID: u.ID, Username: u.Username, Disabled: u.Disabled, Banned: u.Banned, QuotaTotal: u.QuotaTotal, QuotaUsed: u.QuotaUsed, QuotaRemaining: max(0, u.QuotaTotal-u.QuotaUsed), AllowDirect: u.AllowDirect, AllowBucket: u.AllowBucket, CreatedAt: u.CreatedAt, LastSeenAt: u.LastSeenAt, Online: online[u.ID], RunningTasks: running[u.ID]})
+	}
+	sort.Slice(users, func(i, j int) bool { return users[i].CreatedAt > users[j].CreatedAt })
+	return users
+}
+
+func sanitizeTaskForUser(t *GenerationTask) *GenerationTask {
+	cp := *t
+	if cp.Status == "error" {
+		cp.Error = sanitizeError(cp.Error, "")
+	}
+	return &cp
+}
+
+func sanitizeError(msg, baseURL string) string {
+	if baseURL != "" {
+		msg = strings.ReplaceAll(msg, baseURL, "[upstream]")
+	}
+	msg = regexp.MustCompile(`https?://[^\s"']+`).ReplaceAllString(msg, "[url]")
+	msg = regexp.MustCompile(`sk-[A-Za-z0-9_\-]+`).ReplaceAllString(msg, "[api-key]")
+	return msg
+}
+
+func maskSecret(v string) string {
+	if v == "" {
+		return ""
+	}
+	return "********"
+}
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+func toInt(v any) int {
+	switch n := v.(type) {
+	case float64:
+		return int(n)
+	case int:
+		return n
+	case string:
+		var x int
+		fmt.Sscanf(n, "%d", &x)
+		return x
+	default:
+		return 0
+	}
+}
+
+func pickActual(payload map[string]any) map[string]any {
+	out := map[string]any{}
+	for _, k := range []string{"size", "quality", "output_format", "output_compression", "moderation", "n"} {
+		if v, ok := payload[k]; ok {
+			out[k] = v
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func writeFormField(mw *multipart.Writer, k string, v string) {
+	if v != "" && v != "<nil>" {
+		_ = mw.WriteField(k, v)
+	}
+}
+
+func addDataURLFile(mw *multipart.Writer, field, filename, dataURL string) {
+	mimeType, raw, err := parseDataURL(dataURL)
+	if err != nil {
+		return
+	}
+	part, err := mw.CreatePart(textprotoMIMEHeader(map[string]string{"Content-Disposition": fmt.Sprintf(`form-data; name="%s"; filename="%s"`, field, filename), "Content-Type": mimeType}))
+	if err == nil {
+		_, _ = part.Write(raw)
+	}
+}
+
+func textprotoMIMEHeader(m map[string]string) textproto.MIMEHeader {
+	h := textproto.MIMEHeader{}
+	for k, v := range m {
+		h.Set(k, v)
+	}
+	return h
+}
+
+func parseDataURL(dataURL string) (string, []byte, error) {
+	if !strings.HasPrefix(dataURL, "data:") {
+		return "", nil, errors.New("invalid data url")
+	}
+	parts := strings.SplitN(dataURL, ",", 2)
+	if len(parts) != 2 {
+		return "", nil, errors.New("invalid data url")
+	}
+	meta := strings.TrimPrefix(parts[0], "data:")
+	mimeType := strings.Split(meta, ";")[0]
+	if mimeType == "" {
+		mimeType = "image/png"
+	}
+	raw, err := base64.StdEncoding.DecodeString(parts[1])
+	if err != nil {
+		return "", nil, err
+	}
+	return mimeType, raw, nil
+}
+
+func downloadAsDataURL(src, fallbackMime string) (string, error) {
+	resp, err := http.Get(src)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("图片 URL 下载失败：HTTP %d", resp.StatusCode)
+	}
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 200<<20))
+	if err != nil {
+		return "", err
+	}
+	mimeType := resp.Header.Get("Content-Type")
+	if mimeType == "" {
+		mimeType = fallbackMime
+	}
+	return "data:" + mimeType + ";base64," + base64.StdEncoding.EncodeToString(raw), nil
+}
+
+func firstBucket(buckets map[string]*BucketConfig) *BucketConfig {
+	for _, b := range buckets {
+		return b
+	}
+	return nil
+}
+
+func (s *Server) countBucketImages(b *BucketConfig) int {
+	u, err := url.Parse(b.BucketURL)
+	if err != nil {
+		return 0
+	}
+	client := cos.NewClient(&cos.BaseURL{BucketURL: u}, &http.Client{Transport: &cos.AuthorizationTransport{SecretID: b.SecretID, SecretKey: b.SecretKey}})
+	prefix := strings.Trim(strings.TrimSpace(b.PathPrefix), "/")
+	if prefix != "" {
+		prefix += "/"
+	}
+	res, _, err := client.Bucket.Get(context.Background(), &cos.BucketGetOptions{Prefix: prefix, MaxKeys: 1000})
+	if err != nil {
+		return 0
+	}
+	count := 0
+	for _, obj := range res.Contents {
+		if strings.HasPrefix(obj.Key, prefix) {
+			count++
+		}
+	}
+	return count
+}
+
+func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
+	if strings.HasPrefix(r.URL.Path, "/api/") {
+		http.NotFound(w, r)
+		return
+	}
+	path := filepath.Clean(strings.TrimPrefix(r.URL.Path, "/"))
+	if path == "." {
+		path = "index.html"
+	}
+	full := filepath.Join(s.staticDir, path)
+	if st, err := os.Stat(full); err != nil || st.IsDir() {
+		full = filepath.Join(s.staticDir, "index.html")
+	}
+	http.ServeFile(w, r, full)
+}
