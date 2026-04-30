@@ -1,8 +1,10 @@
 import { useState } from 'react'
+import { useEffect } from 'react'
 import { useStore } from '../store'
 import { useVersionCheck } from '../hooks/useVersionCheck'
 import HelpModal from './HelpModal'
 import { logout } from '../lib/backend'
+import { apiRequest } from '../lib/backend'
 
 export default function Header() {
   const setShowSettings = useStore((s) => s.setShowSettings)
@@ -10,12 +12,19 @@ export default function Header() {
   const currentUser = useStore((s) => s.currentUser)
   const { hasUpdate, latestRelease, dismiss } = useVersionCheck()
   const [showHelp, setShowHelp] = useState(false)
+  const [version, setVersion] = useState<{ frontendVersion: string; backendVersion: string } | null>(null)
+
+  useEffect(() => {
+    apiRequest<{ frontendVersion: string; backendVersion: string }>('/api/version')
+      .then(setVersion)
+      .catch(() => setVersion(null))
+  }, [])
 
   return (
     <header data-no-drag-select className="safe-area-top sticky top-0 z-40 bg-white/80 dark:bg-gray-950/80 backdrop-blur border-b border-gray-200 dark:border-white/[0.08]">
       <div className="safe-area-x safe-header-inner max-w-7xl mx-auto flex items-center justify-between">
         <div className="flex items-start gap-1">
-          <h1 className="text-lg font-bold tracking-tight">
+          <h1 className="text-lg font-bold tracking-tight flex items-center gap-2">
             <a
               href="https://github.com/CookSleep/gpt_image_playground"
               target="_blank"
@@ -24,6 +33,11 @@ export default function Header() {
             >
               GPT Image Playground
             </a>
+            {version && (
+              <span className="rounded-full bg-gray-100 px-2 py-0.5 text-[10px] font-medium text-gray-500 dark:bg-white/[0.06] dark:text-gray-400">
+                FE {version.frontendVersion} · BE {version.backendVersion}
+              </span>
+            )}
           </h1>
           {hasUpdate && latestRelease && (
             <a

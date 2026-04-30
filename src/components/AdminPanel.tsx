@@ -6,10 +6,12 @@ type AdminSettings = { baseUrl: string; apiKey: string; model: string; timeout: 
 type AdminUser = { id: string; username: string; disabled: boolean; banned: boolean; quotaTotal: number; quotaUsed: number; quotaRemaining: number; allowDirect: boolean; allowBucket: boolean; online: boolean; runningTasks: number }
 type Bucket = { id: string; name: string; bucketUrl: string; pathPrefix: string; tempUrlMinutes: number; imageCount: number }
 type Failure = { id: string; username: string; prompt: string; error: string; createdAt: number }
+type UpdateInfo = { currentVersion: string; latestVersion: string; updateAvailable: boolean; assetName?: string }
+type UpdateCheck = { backend: UpdateInfo; frontend: UpdateInfo }
 
 export default function AdminPanel() {
   const setCurrentUser = useStore((s) => s.setCurrentUser)
-  const [tab, setTab] = useState<'users' | 'storage' | 'settings'>('users')
+  const [tab, setTab] = useState<'users' | 'storage' | 'settings' | 'updates'>('users')
   const [users, setUsers] = useState<AdminUser[]>([])
   const [buckets, setBuckets] = useState<Bucket[]>([])
   const [failures, setFailures] = useState<Failure[]>([])
@@ -58,15 +60,61 @@ export default function AdminPanel() {
       </header>
       <main className="max-w-7xl mx-auto p-4">
         <div className="flex gap-2 mb-4">
-          {(['users','storage','settings'] as const).map((item) => <button key={item} onClick={() => setTab(item)} className={`rounded-xl px-4 py-2 text-sm ${tab === item ? 'bg-blue-500 text-white' : 'bg-white dark:bg-gray-900'}`}>{item === 'users' ? '用户管理' : item === 'storage' ? '存储设置' : '上游设置'}</button>)}
+          {(['users','storage','settings','updates'] as const).map((item) => <button key={item} onClick={() => setTab(item)} className={`rounded-xl px-4 py-2 text-sm ${tab === item ? 'bg-blue-500 text-white' : 'bg-white dark:bg-gray-900'}`}>{item === 'users' ? '用户管理' : item === 'storage' ? '存储设置' : item === 'settings' ? '上游设置' : '系统更新'}</button>)}
         </div>
         {message && <div className="mb-4 rounded-xl bg-green-50 text-green-600 px-4 py-2 text-sm">{message}</div>}
         {tab === 'users' && <UsersTab users={users} failures={failures} patchUser={patchUser} reload={load} />}
         {tab === 'storage' && <StorageTab buckets={buckets} addBucket={addBucket} />}
         {tab === 'settings' && <SettingsTab settings={settings} setSettings={setSettings} save={saveSettings} />}
+        {tab === 'updates' && <UpdatesTab />}
       </main>
     </div>
   )
+}
+
+function UpdatesTab() {
+  const [info, setInfo] = useState<UpdateCheck | null>(null)
+  const [message, setMessage] = useState('')
+  const [busy, setBusy] = useState(false)
+  const check = async () => {
+    setBusy(true)
+    try {
+      setInfo(await apiRequest<UpdateCheck>('/api/admin/update/check'))
+      setMessage('检查完成')
+    } finally {
+      setBusy(false)
+    }
+  }
+  const update = async (part: 'backend' | 'frontend') => {
+    setBusy(true)
+    try {
+      const result = await apiRequest<{ message: string; needRestart?: boolean }>(`/api/admin/update/${part}`, { method: 'POST' })
+      setMessage(result.message)
+      await check()
+    } finally {
+      setBusy(false)
+    }
+  }
+  const restart = async () => {
+    setBusy(true)
+    try {
+      await apiRequest('/api/admin/update/restart', { method: 'POST' })
+      setMessage('服务正在重启，请稍后刷新页面')
+    } finally {
+      setBusy(false)
+    }
+  }
+  useEffect(() => { void check() }, [])
+  const row = (label: string, data: UpdateInfo | undefined, part: 'backend' | 'frontend') => <div className="rounded-2xl bg-white dark:bg-gray-900 p-4 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+    <div><div className="font-medium">{label}</div><div className="text-sm text-gray-500">当前：{data?.currentVersion || '-'} · 最新：{data?.latestVersion || '-'}</div>{data?.assetName && <div className="text-xs text-gray-400">资产：{data.assetName}</div>}</div>
+    <button disabled={busy || !data?.updateAvailable} onClick={() => update(part)} className="rounded-xl bg-blue-500 disabled:bg-gray-300 disabled:text-gray-500 text-white px-4 py-2">{data?.updateAvailable ? '更新' : '已是最新'}</button>
+  </div>
+  return <div className="space-y-4 max-w-3xl">
+    <div className="flex gap-2"><button disabled={busy} onClick={check} className="rounded-xl bg-white dark:bg-gray-900 px-4 py-2">检查更新</button><button disabled={busy} onClick={restart} className="rounded-xl bg-red-500 text-white px-4 py-2">重启后端</button></div>
+    {message && <div className="rounded-xl bg-green-50 text-green-600 px-4 py-2 text-sm">{message}</div>}
+    {row('后端二进制', info?.backend, 'backend')}
+    {row('前端静态资源', info?.frontend, 'frontend')}
+  </div>
 }
 
 function UsersTab({ users, failures, patchUser, reload }: { users: AdminUser[]; failures: Failure[]; patchUser: (id: string, patch: Partial<AdminUser>) => Promise<void>; reload: () => Promise<void> }) {

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"archive/zip"
 	"bytes"
 	"context"
 	"crypto/aes"
@@ -23,6 +24,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -35,6 +37,13 @@ const (
 	cookieName      = "gip_session"
 	defaultDataDir  = "/data"
 	defaultBindAddr = ":8080"
+	releaseRepo     = "LingyeNBird/gpt_image_playground_distribution"
+)
+
+var (
+	backendVersion  = "dev"
+	frontendVersion = "dev"
+	updateMu        sync.Mutex
 )
 
 type Server struct {
@@ -183,6 +192,7 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/auth/login", s.handleLogin)
 	mux.HandleFunc("/api/auth/logout", s.handleLogout)
 	mux.HandleFunc("/api/auth/me", s.handleMe)
+	mux.HandleFunc("/api/version", s.handleVersion)
 	mux.HandleFunc("/api/generate", s.requireUser(s.handleGenerate))
 	mux.HandleFunc("/api/tasks", s.requireUser(s.handleTasks))
 	mux.HandleFunc("/api/tasks/", s.requireUser(s.handleTaskByID))
@@ -191,7 +201,19 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/admin/users/", s.requireAdmin(s.handleAdminUserByID))
 	mux.HandleFunc("/api/admin/buckets", s.requireAdmin(s.handleAdminBuckets))
 	mux.HandleFunc("/api/admin/failures", s.requireAdmin(s.handleAdminFailures))
+	mux.HandleFunc("/api/admin/update/check", s.requireAdmin(s.handleUpdateCheck))
+	mux.HandleFunc("/api/admin/update/backend", s.requireAdmin(s.handleUpdateBackend))
+	mux.HandleFunc("/api/admin/update/frontend", s.requireAdmin(s.handleUpdateFrontend))
+	mux.HandleFunc("/api/admin/update/restart", s.requireAdmin(s.handleRestart))
 	mux.HandleFunc("/", s.handleStatic)
+}
+
+func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	writeJSON(w, map[string]string{"backendVersion": backendVersion, "frontendVersion": frontendVersion})
 }
 
 func NewStore(dataDir string) (*Store, error) {
@@ -1229,4 +1251,349 @@ func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
 		full = filepath.Join(s.staticDir, "index.html")
 	}
 	http.ServeFile(w, r, full)
+}
+
+type releaseInfo struct {
+	TagName string         `json:"tag_name"`
+	Name    string         `json:"name"`
+	Assets  []releaseAsset `json:"assets"`
+}
+
+type releaseAsset struct {
+	Name               string `json:"name"`
+	BrowserDownloadURL string `json:"browser_download_url"`
+	Size               int64  `json:"size"`
+}
+
+type updateCheckResponse struct {
+	Backend  componentUpdate `json:"backend"`
+	Frontend componentUpdate `json:"frontend"`
+}
+
+type componentUpdate struct {
+	CurrentVersion  string `json:"currentVersion"`
+	LatestVersion   string `json:"latestVersion"`
+	UpdateAvailable bool   `json:"updateAvailable"`
+	AssetName       string `json:"assetName,omitempty"`
+}
+
+func (s *Server) handleUpdateCheck(w http.ResponseWriter, r *http.Request, sess *Session) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	release, err := fetchLatestRelease()
+	if err != nil {
+		httpError(w, 502, err.Error())
+		return
+	}
+	backendLatest := assetVersion(release.Assets, "backend-version.txt")
+	frontendLatest := assetVersion(release.Assets, "frontend-version.txt")
+	backendAsset := backendAssetName()
+	frontendAsset := frontendAssetName(frontendLatest)
+	writeJSON(w, updateCheckResponse{
+		Backend:  componentUpdate{CurrentVersion: backendVersion, LatestVersion: backendLatest, UpdateAvailable: backendLatest != "" && backendLatest != backendVersion && findAsset(release.Assets, backendAsset) != nil, AssetName: backendAsset},
+		Frontend: componentUpdate{CurrentVersion: frontendVersion, LatestVersion: frontendLatest, UpdateAvailable: frontendLatest != "" && frontendLatest != frontendVersion && findAsset(release.Assets, frontendAsset) != nil, AssetName: frontendAsset},
+	})
+}
+
+func (s *Server) handleUpdateBackend(w http.ResponseWriter, r *http.Request, sess *Session) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w)
+		return
+	}
+	if !updateMu.TryLock() {
+		httpError(w, 409, "已有更新任务正在执行")
+		return
+	}
+	defer updateMu.Unlock()
+	release, err := fetchLatestRelease()
+	if err != nil {
+		httpError(w, 502, err.Error())
+		return
+	}
+	asset := findAsset(release.Assets, backendAssetName())
+	if asset == nil {
+		httpError(w, 404, "未找到当前平台后端二进制资产")
+		return
+	}
+	archivePath, err := downloadReleaseAsset(*asset, s.dataDir)
+	if err != nil {
+		httpError(w, 502, err.Error())
+		return
+	}
+	defer os.Remove(archivePath)
+	if err := replaceExecutableFromZip(archivePath); err != nil {
+		httpError(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true, "message": "后端已更新，重启后生效", "needRestart": true})
+}
+
+func (s *Server) handleUpdateFrontend(w http.ResponseWriter, r *http.Request, sess *Session) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w)
+		return
+	}
+	if !updateMu.TryLock() {
+		httpError(w, 409, "已有更新任务正在执行")
+		return
+	}
+	defer updateMu.Unlock()
+	release, err := fetchLatestRelease()
+	if err != nil {
+		httpError(w, 502, err.Error())
+		return
+	}
+	latest := assetVersion(release.Assets, "frontend-version.txt")
+	asset := findAsset(release.Assets, frontendAssetName(latest))
+	if asset == nil {
+		httpError(w, 404, "未找到前端静态资源资产")
+		return
+	}
+	archivePath, err := downloadReleaseAsset(*asset, s.dataDir)
+	if err != nil {
+		httpError(w, 502, err.Error())
+		return
+	}
+	defer os.Remove(archivePath)
+	if err := replaceStaticDistFromZip(archivePath, s.staticDir); err != nil {
+		httpError(w, 500, err.Error())
+		return
+	}
+	frontendVersion = latest
+	writeJSON(w, map[string]any{"ok": true, "message": "前端已更新，刷新页面后生效", "needRestart": false})
+}
+
+func (s *Server) handleRestart(w http.ResponseWriter, r *http.Request, sess *Session) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w)
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true, "message": "服务即将重启"})
+	go func() { time.Sleep(500 * time.Millisecond); os.Exit(0) }()
+}
+
+func fetchLatestRelease() (*releaseInfo, error) {
+	url := "https://api.github.com/repos/" + releaseRepo + "/releases/latest"
+	req, _ := http.NewRequest(http.MethodGet, url, nil)
+	req.Header.Set("User-Agent", "gpt-image-playground-distribution-updater")
+	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return nil, fmt.Errorf("GitHub Release 查询失败：HTTP %d %s", resp.StatusCode, string(body))
+	}
+	var release releaseInfo
+	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
+		return nil, err
+	}
+	return &release, nil
+}
+
+func backendAssetName() string {
+	return fmt.Sprintf("gip-server_%s_%s_%s.zip", backendVersionOrLatest(), runtime.GOOS, runtime.GOARCH)
+}
+
+func frontendAssetName(version string) string {
+	if version == "" {
+		version = frontendVersion
+	}
+	return fmt.Sprintf("frontend-dist_%s.zip", version)
+}
+
+func backendVersionOrLatest() string { return "LATEST" }
+
+func findAsset(assets []releaseAsset, name string) *releaseAsset {
+	if strings.Contains(name, "LATEST") {
+		for i := range assets {
+			if strings.HasPrefix(assets[i].Name, "gip-server_") && strings.Contains(assets[i].Name, "_"+runtime.GOOS+"_"+runtime.GOARCH) {
+				return &assets[i]
+			}
+		}
+		return nil
+	}
+	for i := range assets {
+		if assets[i].Name == name {
+			return &assets[i]
+		}
+	}
+	return nil
+}
+
+func assetVersion(assets []releaseAsset, name string) string {
+	asset := findAsset(assets, name)
+	if asset == nil {
+		return ""
+	}
+	path, err := downloadReleaseAsset(*asset, os.TempDir())
+	if err != nil {
+		return ""
+	}
+	defer os.Remove(path)
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(b))
+}
+
+func downloadReleaseAsset(asset releaseAsset, dir string) (string, error) {
+	if err := validateDownloadURL(asset.BrowserDownloadURL); err != nil {
+		return "", err
+	}
+	resp, err := http.Get(asset.BrowserDownloadURL)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("下载 %s 失败：HTTP %d", asset.Name, resp.StatusCode)
+	}
+	path := filepath.Join(dir, randomHex(8)+"-"+filepath.Base(asset.Name))
+	out, err := os.Create(path)
+	if err != nil {
+		return "", err
+	}
+	defer out.Close()
+	_, err = io.Copy(out, io.LimitReader(resp.Body, 600<<20))
+	return path, err
+}
+
+func validateDownloadURL(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return err
+	}
+	if u.Scheme != "https" {
+		return errors.New("更新资源必须使用 HTTPS")
+	}
+	allowed := map[string]bool{"github.com": true, "objects.githubusercontent.com": true, "release-assets.githubusercontent.com": true}
+	if !allowed[strings.ToLower(u.Hostname())] {
+		return fmt.Errorf("不允许的下载域名：%s", u.Hostname())
+	}
+	return nil
+}
+
+func replaceExecutableFromZip(path string) error {
+	exe, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	if strings.HasSuffix(path, ".zip") {
+		return replaceExecutableFromZipArchive(path, exe)
+	}
+	return errors.New("当前仅支持 zip 后端资产更新")
+}
+
+func replaceExecutableFromZipArchive(path string, exe string) error {
+	zr, err := zip.OpenReader(path)
+	if err != nil {
+		return err
+	}
+	defer zr.Close()
+	var target *zip.File
+	for _, f := range zr.File {
+		if !f.FileInfo().IsDir() && (filepath.Base(f.Name) == "gip-server" || filepath.Base(f.Name) == "gip-server.exe") {
+			target = f
+			break
+		}
+	}
+	if target == nil {
+		return errors.New("压缩包中未找到后端二进制")
+	}
+	rc, err := target.Open()
+	if err != nil {
+		return err
+	}
+	defer rc.Close()
+	tmp := exe + ".new"
+	out, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o755)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, io.LimitReader(rc, 200<<20)); err != nil {
+		out.Close()
+		return err
+	}
+	if err := out.Close(); err != nil {
+		return err
+	}
+	backup := exe + ".backup"
+	_ = os.Remove(backup)
+	if err := os.Rename(exe, backup); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, exe); err != nil {
+		_ = os.Rename(backup, exe)
+		return err
+	}
+	return nil
+}
+
+func replaceStaticDistFromZip(path string, staticDir string) error {
+	if staticDir == "" {
+		return errors.New("STATIC_DIR 为空，无法更新前端")
+	}
+	zr, err := zip.OpenReader(path)
+	if err != nil {
+		return err
+	}
+	defer zr.Close()
+	parent := filepath.Dir(staticDir)
+	tmp := filepath.Join(parent, ".dist-new-"+randomHex(4))
+	if err := os.MkdirAll(tmp, 0o755); err != nil {
+		return err
+	}
+	defer os.RemoveAll(tmp)
+	for _, f := range zr.File {
+		if f.FileInfo().IsDir() {
+			continue
+		}
+		clean := filepath.Clean(f.Name)
+		clean = strings.TrimPrefix(filepath.ToSlash(clean), "dist/")
+		if clean == "." || strings.HasPrefix(clean, "../") || strings.Contains(clean, "/../") {
+			return errors.New("前端压缩包路径不安全")
+		}
+		dst := filepath.Join(tmp, filepath.FromSlash(clean))
+		if !strings.HasPrefix(filepath.Clean(dst), filepath.Clean(tmp)) {
+			return errors.New("前端压缩包路径越界")
+		}
+		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+			return err
+		}
+		rc, err := f.Open()
+		if err != nil {
+			return err
+		}
+		out, err := os.Create(dst)
+		if err != nil {
+			rc.Close()
+			return err
+		}
+		_, copyErr := io.Copy(out, io.LimitReader(rc, 200<<20))
+		closeErr := out.Close()
+		rc.Close()
+		if copyErr != nil {
+			return copyErr
+		}
+		if closeErr != nil {
+			return closeErr
+		}
+	}
+	backup := staticDir + ".backup"
+	_ = os.RemoveAll(backup)
+	if _, err := os.Stat(staticDir); err == nil {
+		if err := os.Rename(staticDir, backup); err != nil {
+			return err
+		}
+	}
+	if err := os.Rename(tmp, staticDir); err != nil {
+		_ = os.Rename(backup, staticDir)
+		return err
+	}
+	return nil
 }
