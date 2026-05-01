@@ -71,6 +71,8 @@ export type TaskStatus = 'running' | 'done' | 'error'
 
 export interface TaskRecord {
   id: string
+  /** 本地浏览器历史所属用户；用于同一浏览器多账号隔离 */
+  ownerUserId?: string
   prompt: string
   params: TaskParams
   /** API 返回的实际生效参数，用于标记与请求值不一致的情况 */

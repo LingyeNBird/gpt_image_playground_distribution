@@ -66,6 +66,41 @@ function orderImagesWithMaskFirst(images: InputImage[], maskTargetImageId: strin
   return next
 }
 
+function isTaskVisibleToUser(task: TaskRecord, user: CurrentUser | null): boolean {
+  return Boolean(user?.role === 'user' && task.ownerUserId === user.id)
+}
+
+async function loadLocalTasksForUser(user: CurrentUser | null): Promise<void> {
+  const tasks = await getAllTasks()
+  const visibleTasks = tasks.filter((task) => isTaskVisibleToUser(task, user))
+  useStore.getState().setTasks(visibleTasks)
+
+  // 收集全部本地任务引用的图片 id，避免切换账号时误删其他用户的本地图片缓存。
+  const referencedIds = new Set<string>()
+  for (const t of tasks) {
+    for (const id of t.inputImageIds || []) referencedIds.add(id)
+    if (t.maskImageId) referencedIds.add(t.maskImageId)
+    for (const id of t.outputImages || []) referencedIds.add(id)
+  }
+
+  imageCache.clear()
+  const visibleImageIds = new Set<string>()
+  for (const t of visibleTasks) {
+    for (const id of t.inputImageIds || []) visibleImageIds.add(id)
+    if (t.maskImageId) visibleImageIds.add(t.maskImageId)
+    for (const id of t.outputImages || []) visibleImageIds.add(id)
+  }
+
+  const images = await getAllImages()
+  for (const img of images) {
+    if (visibleImageIds.has(img.id)) {
+      imageCache.set(img.id, img.dataUrl)
+    } else if (!referencedIds.has(img.id)) {
+      await deleteImage(img.id)
+    }
+  }
+}
+
 // ===== Store 类型 =====
 
 interface AppState {
@@ -150,7 +185,10 @@ export const useStore = create<AppState>()(
     (set, get) => ({
       // Settings
       currentUser: null,
-      setCurrentUser: (currentUser) => set({ currentUser }),
+      setCurrentUser: (currentUser) => {
+        set({ currentUser, tasks: [], selectedTaskIds: [], detailTaskId: null, lightboxImageId: null, lightboxImageList: [] })
+        void loadLocalTasksForUser(currentUser)
+      },
       authChecked: false,
       setAuthChecked: (authChecked) => set({ authChecked }),
       settings: { ...DEFAULT_SETTINGS },
@@ -337,35 +375,18 @@ function normalizeParamsForSettings(params: TaskParams, settings: AppSettings): 
 
 /** 初始化：从 IndexedDB 加载任务和图片缓存，清理孤立图片 */
 export async function initStore() {
+  let currentUser: CurrentUser | null = null
   try {
-    const user = await getCurrentUser()
-    useStore.getState().setCurrentUser(user)
+    currentUser = await getCurrentUser()
+    useStore.setState({ currentUser })
   } catch {
-    useStore.getState().setCurrentUser(null)
+    currentUser = null
+    useStore.setState({ currentUser: null })
   } finally {
     useStore.getState().setAuthChecked(true)
   }
 
-  const tasks = await getAllTasks()
-  useStore.getState().setTasks(tasks)
-
-  // 收集所有任务引用的图片 id
-  const referencedIds = new Set<string>()
-  for (const t of tasks) {
-    for (const id of t.inputImageIds || []) referencedIds.add(id)
-    if (t.maskImageId) referencedIds.add(t.maskImageId)
-    for (const id of t.outputImages || []) referencedIds.add(id)
-  }
-
-  // 预加载所有图片到缓存，同时清理孤立图片
-  const images = await getAllImages()
-  for (const img of images) {
-    if (referencedIds.has(img.id)) {
-      imageCache.set(img.id, img.dataUrl)
-    } else {
-      await deleteImage(img.id)
-    }
-  }
+  await loadLocalTasksForUser(currentUser)
 }
 
 /** 提交新任务 */
@@ -411,8 +432,8 @@ export async function submitTask(options: { allowFullMask?: boolean } = {}) {
   }
 
   const { currentUser } = useStore.getState()
-  if (!currentUser || currentUser.role !== 'user') {
-    showToast('请先登录普通用户账号', 'error')
+  if (!currentUser) {
+    showToast('请先登录', 'error')
     return
   }
 
@@ -439,6 +460,7 @@ export async function submitTask(options: { allowFullMask?: boolean } = {}) {
   const taskId = genId()
   const task: TaskRecord = {
     id: taskId,
+    ownerUserId: currentUser.id,
     prompt: prompt.trim(),
     params: normalizedParams,
     inputImageIds: orderedInputImages.map((i) => i.id),
@@ -590,11 +612,13 @@ export function updateTaskInStore(taskId: string, patch: Partial<TaskRecord>) {
 
 /** 重试失败的任务：创建新任务并执行 */
 export async function retryTask(task: TaskRecord) {
-  const { settings } = useStore.getState()
+  const { settings, currentUser } = useStore.getState()
+  if (!currentUser || currentUser.role !== 'user') return
   const normalizedParams = normalizeParamsForSettings(task.params, settings)
   const taskId = genId()
   const newTask: TaskRecord = {
     id: taskId,
+    ownerUserId: currentUser.id,
     prompt: task.prompt,
     params: normalizedParams,
     inputImageIds: [...task.inputImageIds],
@@ -790,9 +814,9 @@ function bytesToDataUrl(bytes: Uint8Array, filePath: string): string {
 /** 导出数据为 ZIP */
 export async function exportData() {
   try {
-    const tasks = await getAllTasks()
+    const { settings, currentUser } = useStore.getState()
+    const tasks = (await getAllTasks()).filter((task) => isTaskVisibleToUser(task, currentUser))
     const images = await getAllImages()
-    const { settings } = useStore.getState()
     const exportedAt = Date.now()
     const imageCreatedAtFallback = new Map<string, number>()
 
@@ -812,7 +836,7 @@ export async function exportData() {
     const imageFiles: ExportData['imageFiles'] = {}
     const zipFiles: Record<string, Uint8Array | [Uint8Array, { mtime: Date }]> = {}
 
-    for (const img of images) {
+    for (const img of images.filter((image) => imageCreatedAtFallback.has(image.id))) {
       const { ext, bytes } = dataUrlToBytes(img.dataUrl)
       const path = `images/${img.id}.${ext}`
       const createdAt = img.createdAt ?? imageCreatedAtFallback.get(img.id) ?? exportedAt
@@ -852,6 +876,8 @@ export async function exportData() {
 /** 导入 ZIP 数据 */
 export async function importData(file: File) {
   try {
+    const { currentUser } = useStore.getState()
+    if (!currentUser || currentUser.role !== 'user') throw new Error('请先登录普通用户账号')
     const buffer = await file.arrayBuffer()
     const unzipped = unzipSync(new Uint8Array(buffer))
 
@@ -871,15 +897,14 @@ export async function importData(file: File) {
     }
 
     for (const task of data.tasks) {
-      await putTask(task)
+      await putTask({ ...task, ownerUserId: currentUser.id })
     }
 
     if (data.settings) {
       useStore.getState().setSettings(data.settings)
     }
 
-    const tasks = await getAllTasks()
-    useStore.getState().setTasks(tasks)
+    await loadLocalTasksForUser(currentUser)
     useStore
       .getState()
       .showToast(`已导入 ${data.tasks.length} 条记录`, 'success')
