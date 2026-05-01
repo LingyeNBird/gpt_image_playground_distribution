@@ -22,7 +22,8 @@ export default function SettingsModal() {
   const currentUser = useStore((s) => s.currentUser)
   const [deliveryMode, setDeliveryMode] = useState(settings.deliveryMode)
   const [adminSettings, setAdminSettings] = useState<AdminSettings>(defaultAdminSettings)
-  const [message, setMessage] = useState('')
+  const [message, setMessage] = useState<{ type: 'success' | 'error' | 'info'; text: string } | null>(null)
+  const [testing, setTesting] = useState<'url' | 'key' | null>(null)
 
   useEffect(() => {
     if (showSettings) setDeliveryMode(settings.deliveryMode)
@@ -30,10 +31,10 @@ export default function SettingsModal() {
 
   useEffect(() => {
     if (!showSettings || currentUser?.role !== 'admin') return
-    setMessage('')
+    setMessage(null)
     apiRequest<AdminSettings>('/api/admin/settings')
       .then((data) => setAdminSettings({ ...defaultAdminSettings, ...data }))
-      .catch((err) => setMessage(`读取上游设置失败：${err instanceof Error ? err.message : String(err)}`))
+      .catch((err) => setMessage({ type: 'error', text: `读取上游设置失败：${err instanceof Error ? err.message : String(err)}` }))
   }, [showSettings, currentUser?.role])
 
   const handleClose = () => {
@@ -51,7 +52,21 @@ export default function SettingsModal() {
       apiMode: adminSettings.apiMode === 'responses' ? 'responses' : 'images',
       codexCli: adminSettings.codexCli,
     })
-    setMessage('上游设置已保存')
+    setMessage({ type: 'success', text: '上游设置已保存' })
+  }
+
+  const testAdminSetting = async (kind: 'url' | 'key') => {
+    setTesting(kind)
+    setMessage({ type: 'info', text: kind === 'url' ? '正在测试上游 API URL…' : '正在验证上游 API Key…' })
+    try {
+      const endpoint = kind === 'url' ? '/api/admin/settings/test-url' : '/api/admin/settings/verify-key'
+      const result = await apiRequest<{ message: string }>(endpoint, { method: 'POST', body: JSON.stringify(adminSettings) })
+      setMessage({ type: 'success', text: result.message })
+    } catch (err) {
+      setMessage({ type: 'error', text: err instanceof Error ? err.message : String(err) })
+    } finally {
+      setTesting(null)
+    }
   }
 
   useCloseOnEscape(showSettings, handleClose)
@@ -71,7 +86,7 @@ export default function SettingsModal() {
             <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
           </button>
         </div>
-        {message && <div className="mb-4 rounded-xl bg-green-50 px-3 py-2 text-sm text-green-600 dark:bg-green-500/10 dark:text-green-300">{message}</div>}
+        {message && <div className={`mb-4 rounded-xl px-3 py-2 text-sm ${message.type === 'error' ? 'bg-red-50 text-red-600 dark:bg-red-500/10 dark:text-red-300' : message.type === 'info' ? 'bg-blue-50 text-blue-600 dark:bg-blue-500/10 dark:text-blue-300' : 'bg-green-50 text-green-600 dark:bg-green-500/10 dark:text-green-300'}`}>{message.text}</div>}
         <section>
           <h4 className="mb-4 text-sm font-medium text-gray-800 dark:text-gray-200">分发模式</h4>
           <div className="space-y-3">
@@ -91,11 +106,17 @@ export default function SettingsModal() {
             <div className="grid gap-3 md:grid-cols-2">
               <label className="block md:col-span-2">
                 <span className="text-xs text-gray-500">上游 API URL</span>
-                <input value={adminSettings.baseUrl} onChange={(e) => setAdminSettings({ ...adminSettings, baseUrl: e.target.value })} className="mt-1 w-full rounded-xl border bg-transparent px-3 py-2" />
+                <div className="mt-1 flex gap-2">
+                  <input value={adminSettings.baseUrl} onChange={(e) => setAdminSettings({ ...adminSettings, baseUrl: e.target.value })} className="min-w-0 flex-1 rounded-xl border bg-transparent px-3 py-2" />
+                  <button type="button" disabled={testing !== null} onClick={() => testAdminSetting('url')} className="rounded-xl border border-blue-200 bg-blue-50 px-4 py-2 text-sm font-medium text-blue-600 transition hover:bg-blue-100 disabled:opacity-60 dark:border-blue-500/20 dark:bg-blue-500/10 dark:text-blue-300">{testing === 'url' ? '测试中…' : '测试'}</button>
+                </div>
               </label>
               <label className="block md:col-span-2">
                 <span className="text-xs text-gray-500">上游 API Key</span>
-                <input type="password" value={adminSettings.apiKey} onChange={(e) => setAdminSettings({ ...adminSettings, apiKey: e.target.value })} className="mt-1 w-full rounded-xl border bg-transparent px-3 py-2" />
+                <div className="mt-1 flex gap-2">
+                  <input type="password" value={adminSettings.apiKey} onChange={(e) => setAdminSettings({ ...adminSettings, apiKey: e.target.value })} className="min-w-0 flex-1 rounded-xl border bg-transparent px-3 py-2" />
+                  <button type="button" disabled={testing !== null} onClick={() => testAdminSetting('key')} className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-2 text-sm font-medium text-emerald-600 transition hover:bg-emerald-100 disabled:opacity-60 dark:border-emerald-500/20 dark:bg-emerald-500/10 dark:text-emerald-300">{testing === 'key' ? '验证中…' : '验证'}</button>
+                </div>
               </label>
               <label className="block">
                 <span className="text-xs text-gray-500">模型</span>

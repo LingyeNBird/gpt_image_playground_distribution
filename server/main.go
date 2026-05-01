@@ -209,6 +209,8 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/tasks", s.requireUser(s.handleTasks))
 	mux.HandleFunc("/api/tasks/", s.requireUser(s.handleTaskByID))
 	mux.HandleFunc("/api/admin/settings", s.requireAdmin(s.handleAdminSettings))
+	mux.HandleFunc("/api/admin/settings/test-url", s.requireAdmin(s.handleAdminSettingsTestURL))
+	mux.HandleFunc("/api/admin/settings/verify-key", s.requireAdmin(s.handleAdminSettingsVerifyKey))
 	mux.HandleFunc("/api/admin/users", s.requireAdmin(s.handleAdminUsers))
 	mux.HandleFunc("/api/admin/users/", s.requireAdmin(s.handleAdminUserByID))
 	mux.HandleFunc("/api/admin/buckets", s.requireAdmin(s.handleAdminBuckets))
@@ -595,6 +597,99 @@ func (s *Server) handleAdminSettings(w http.ResponseWriter, r *http.Request, ses
 	}
 }
 
+func (s *Server) handleAdminSettingsTestURL(w http.ResponseWriter, r *http.Request, sess *Session) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w)
+		return
+	}
+	var req AdminSettings
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	settings := s.resolveTestSettings(req)
+	endpoint, err := upstreamEndpoint(settings.BaseURL, "/models")
+	if err != nil {
+		httpError(w, 400, err.Error())
+		return
+	}
+	client := http.Client{Timeout: 8 * time.Second}
+	request, _ := http.NewRequest(http.MethodGet, endpoint, nil)
+	request.Header.Set("User-Agent", "gpt-image-playground-distribution-tester")
+	resp, err := client.Do(request)
+	if err != nil {
+		httpError(w, 502, "连接失败："+err.Error())
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 500 {
+		httpError(w, 502, fmt.Sprintf("端点可连接，但上游返回 HTTP %d", resp.StatusCode))
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true, "message": fmt.Sprintf("端点可连接，返回 HTTP %d", resp.StatusCode)})
+}
+
+func (s *Server) handleAdminSettingsVerifyKey(w http.ResponseWriter, r *http.Request, sess *Session) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w)
+		return
+	}
+	var req AdminSettings
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	settings := s.resolveTestSettings(req)
+	if strings.TrimSpace(settings.APIKey) == "" || settings.APIKey == "********" {
+		httpError(w, 400, "请先填写上游 API Key")
+		return
+	}
+	endpoint, err := upstreamEndpoint(settings.BaseURL, "/models")
+	if err != nil {
+		httpError(w, 400, err.Error())
+		return
+	}
+	client := http.Client{Timeout: 10 * time.Second}
+	request, _ := http.NewRequest(http.MethodGet, endpoint, nil)
+	request.Header.Set("Authorization", "Bearer "+settings.APIKey)
+	request.Header.Set("User-Agent", "gpt-image-playground-distribution-tester")
+	resp, err := client.Do(request)
+	if err != nil {
+		httpError(w, 502, "验证失败："+err.Error())
+		return
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		httpError(w, 401, fmt.Sprintf("API Key 鉴权未通过：HTTP %d", resp.StatusCode))
+		return
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		httpError(w, 502, fmt.Sprintf("上游返回 HTTP %d：%s", resp.StatusCode, strings.TrimSpace(string(body))))
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true, "message": "API Key 鉴权通过"})
+}
+
+func (s *Server) resolveTestSettings(req AdminSettings) AdminSettings {
+	current := s.store.snapshot().Settings
+	req.BaseURL = strings.TrimSpace(req.BaseURL)
+	if req.BaseURL == "" {
+		req.BaseURL = current.BaseURL
+	}
+	if req.APIKey == "********" {
+		req.APIKey = current.APIKey
+	}
+	if req.Model == "" {
+		req.Model = current.Model
+	}
+	if req.Timeout <= 0 {
+		req.Timeout = current.Timeout
+	}
+	if req.APIMode == "" {
+		req.APIMode = current.APIMode
+	}
+	return req
+}
+
 func (s *Server) handleAdminUsers(w http.ResponseWriter, r *http.Request, sess *Session) {
 	switch r.Method {
 	case http.MethodGet:
@@ -861,12 +956,17 @@ func (s *Server) callUpstream(settings AdminSettings, task *GenerationTask, inpu
 	if settings.APIMode == "responses" {
 		return nil, nil, nil, nil, errors.New("后端 Responses API 代理暂未实现，请在管理员设置中使用 Images API")
 	}
-	base := strings.TrimRight(settings.BaseURL, "/")
-	endpoint := base + "/images/generations"
+	endpoint, err := upstreamEndpoint(settings.BaseURL, "/images/generations")
+	if err != nil {
+		return nil, nil, nil, nil, err
+	}
 	var body io.Reader
 	headers := map[string]string{"Authorization": "Bearer " + settings.APIKey, "Cache-Control": "no-store", "Pragma": "no-cache"}
 	if len(inputImages) > 0 {
-		endpoint = base + "/images/edits"
+		endpoint, err = upstreamEndpoint(settings.BaseURL, "/images/edits")
+		if err != nil {
+			return nil, nil, nil, nil, err
+		}
 		buf := &bytes.Buffer{}
 		mw := multipart.NewWriter(buf)
 		writeFormField(mw, "model", settings.Model)
@@ -1270,6 +1370,20 @@ func maskSecret(v string) string {
 	}
 	return "********"
 }
+
+func upstreamEndpoint(baseURL, path string) (string, error) {
+	baseURL = strings.TrimSpace(baseURL)
+	if baseURL == "" {
+		return "", errors.New("请填写上游 API URL")
+	}
+	parsed, err := url.Parse(baseURL)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return "", errors.New("上游 API URL 格式不正确")
+	}
+	base := strings.TrimRight(baseURL, "/")
+	return base + path, nil
+}
+
 func max(a, b int) int {
 	if a > b {
 		return a
