@@ -309,8 +309,8 @@ func (st *Store) with(fn func(*AppState) error) error {
 
 func appendAudit(st *AppState, typ, title, detail, userID, username string) {
 	st.AuditLogs = append([]AuditLog{{ID: randomHex(12), Type: typ, Title: title, Detail: detail, UserID: userID, Username: username, CreatedAt: nowMs()}}, st.AuditLogs...)
-	if len(st.AuditLogs) > 500 {
-		st.AuditLogs = st.AuditLogs[:500]
+	if len(st.AuditLogs) > 5000 {
+		st.AuditLogs = st.AuditLogs[:5000]
 	}
 }
 
@@ -761,7 +761,19 @@ func (s *Server) handleAdminAudit(w http.ResponseWriter, r *http.Request, sess *
 	if audit == nil {
 		audit = []AuditLog{}
 	}
-	writeJSON(w, map[string]any{"audit": audit})
+	offset := max(0, toInt(r.URL.Query().Get("offset")))
+	limit := toInt(r.URL.Query().Get("limit"))
+	if limit <= 0 || limit > 100 {
+		limit = 30
+	}
+	if offset > len(audit) {
+		offset = len(audit)
+	}
+	end := offset + limit
+	if end > len(audit) {
+		end = len(audit)
+	}
+	writeJSON(w, map[string]any{"audit": audit[offset:end], "total": len(audit), "offset": offset, "limit": limit, "hasMore": end < len(audit)})
 }
 
 func (s *Server) executeGeneration(taskID string, settings AdminSettings, inputImages []string, maskDataURL string) {

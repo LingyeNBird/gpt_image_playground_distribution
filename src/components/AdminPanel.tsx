@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
 import { apiRequest } from '../lib/backend'
 
@@ -6,6 +6,7 @@ type AdminUser = { id: string; username: string; disabled: boolean; banned: bool
 type Bucket = { id: string; name: string; bucketUrl: string; pathPrefix: string; tempUrlMinutes: number; imageCount: number }
 type Failure = { id: string; username: string; prompt: string; error: string; createdAt: number }
 type AuditEntry = { id: string; type: string; title: string; detail: string; userId?: string; username?: string; createdAt: number }
+type AuditPage = { audit: AuditEntry[]; total: number; offset: number; limit: number; hasMore: boolean }
 type UpdateInfo = { currentVersion: string; latestVersion: string; updateAvailable: boolean; assetName?: string }
 type UpdateCheck = { backend: UpdateInfo; frontend: UpdateInfo }
 
@@ -17,6 +18,7 @@ const outline = '#c3c6d7'
 const onSurface = '#191b23'
 const onSurfaceVariant = '#434655'
 const primary = '#004ac6'
+const auditPageSize = 30
 const inputClass = 'h-[42px] w-full rounded border border-[#c3c6d7] bg-[#f3f3fe] px-4 py-2 text-sm text-[#191b23] outline-none transition-colors placeholder:text-[#737686] focus:border-[#191b23] focus:ring-1 focus:ring-[#191b23]'
 const primaryButton = 'h-[42px] rounded bg-[#191b23] px-6 py-2 text-sm font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-60'
 const quietButton = 'h-[42px] rounded border border-[#c3c6d7] bg-white px-6 py-2 text-sm font-medium text-[#434655] transition-colors hover:bg-[#faf8ff]'
@@ -27,9 +29,33 @@ export default function AdminPanel() {
   const [buckets, setBuckets] = useState<Bucket[]>([])
   const [failures, setFailures] = useState<Failure[]>([])
   const [audit, setAudit] = useState<AuditEntry[]>([])
+  const [auditHasMore, setAuditHasMore] = useState(false)
+  const [auditLoading, setAuditLoading] = useState(false)
   const [message, setMessage] = useState('')
   const [usersLoading, setUsersLoading] = useState(true)
   const [usersError, setUsersError] = useState('')
+
+  const loadAuditPage = useCallback(async (offset: number) => {
+    setAuditLoading(true)
+    try {
+      const page = await apiRequest<AuditPage>(`/api/admin/audit?offset=${offset}&limit=${auditPageSize}`)
+      setAudit((current) => {
+        const next = offset === 0 ? [] : [...current]
+        const seen = new Set(next.map((item) => item.id))
+        for (const item of page.audit ?? []) {
+          if (!seen.has(item.id)) next.push(item)
+        }
+        return next
+      })
+      setAuditHasMore(Boolean(page.hasMore))
+    } finally {
+      setAuditLoading(false)
+    }
+  }, [])
+
+  const refreshAudit = useCallback(async () => {
+    await loadAuditPage(0)
+  }, [loadAuditPage])
 
   const loadUsers = async () => {
     setUsersLoading(true)
@@ -49,7 +75,7 @@ export default function AdminPanel() {
       loadUsers(),
       apiRequest<{ buckets: Bucket[] }>('/api/admin/buckets').then((b) => setBuckets(b.buckets ?? [])).catch(() => setBuckets([])),
       apiRequest<{ failures: Failure[] }>('/api/admin/failures').then((f) => setFailures(f.failures ?? [])).catch(() => setFailures([])),
-      apiRequest<{ audit: AuditEntry[] }>('/api/admin/audit').then((a) => setAudit(a.audit ?? [])).catch(() => setAudit([])),
+      refreshAudit().catch(() => { setAudit([]); setAuditHasMore(false) }),
     ])
   }
 
@@ -67,7 +93,7 @@ export default function AdminPanel() {
     if (result.user) {
       setUsers((current) => current.map((user) => user.id === id ? result.user : user))
     }
-    void apiRequest<{ audit: AuditEntry[] }>('/api/admin/audit').then((a) => setAudit(a.audit ?? [])).catch(() => undefined)
+    void refreshAudit().catch(() => undefined)
   }
 
   const addBucket = async (e: React.FormEvent<HTMLFormElement>) => {
@@ -103,7 +129,7 @@ export default function AdminPanel() {
 
       {message && <div className="mb-4 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700 dark:border-emerald-500/20 dark:bg-emerald-500/10 dark:text-emerald-300">{message}</div>}
 
-        {tab === 'users' && <UsersTab users={users} audit={audit} failures={failures} usersLoading={usersLoading} usersError={usersError} patchUser={patchUser} reload={loadUsers} setUsers={setUsers} setAudit={setAudit} />}
+        {tab === 'users' && <UsersTab users={users} audit={audit} failures={failures} usersLoading={usersLoading} usersError={usersError} auditLoading={auditLoading} auditHasMore={auditHasMore} patchUser={patchUser} reload={loadUsers} setUsers={setUsers} refreshAudit={refreshAudit} loadOlderAudit={() => loadAuditPage(audit.length)} />}
       {tab === 'storage' && <StorageTab buckets={buckets} addBucket={addBucket} />}
       {tab === 'updates' && <UpdatesTab setGlobalMessage={setMessage} />}
       </main>
@@ -125,7 +151,7 @@ function MaterialLikeIcon({ name, className = '' }: { name: string; className?: 
   return <span className={`material-symbols-outlined ${className}`}>{name}</span>
 }
 
-function UsersTab({ users, audit, failures, usersLoading, usersError, patchUser, reload, setUsers, setAudit }: { users: AdminUser[]; audit: AuditEntry[]; failures: Failure[]; usersLoading: boolean; usersError: string; patchUser: (id: string, patch: Partial<AdminUser>) => Promise<void>; reload: () => Promise<void>; setUsers: React.Dispatch<React.SetStateAction<AdminUser[]>>; setAudit: React.Dispatch<React.SetStateAction<AuditEntry[]>> }) {
+function UsersTab({ users, audit, failures, usersLoading, usersError, auditLoading, auditHasMore, patchUser, reload, setUsers, refreshAudit, loadOlderAudit }: { users: AdminUser[]; audit: AuditEntry[]; failures: Failure[]; usersLoading: boolean; usersError: string; auditLoading: boolean; auditHasMore: boolean; patchUser: (id: string, patch: Partial<AdminUser>) => Promise<void>; reload: () => Promise<void>; setUsers: React.Dispatch<React.SetStateAction<AdminUser[]>>; refreshAudit: () => Promise<void>; loadOlderAudit: () => Promise<void> }) {
   const [showAddUser, setShowAddUser] = useState(false)
 
   return <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
@@ -148,8 +174,8 @@ function UsersTab({ users, audit, failures, usersLoading, usersError, patchUser,
       </div>
       </div>
     </section>
-    <AuditLog audit={audit} failures={failures} />
-    {showAddUser && <AddUserModal onClose={() => setShowAddUser(false)} onCreated={async (user) => { if (user) setUsers((current) => [user, ...current.filter((item) => item.id !== user.id)]); else await reload(); void apiRequest<{ audit: AuditEntry[] }>('/api/admin/audit').then((a) => setAudit(a.audit ?? [])).catch(() => undefined) }} />}
+    <AuditLog audit={audit} failures={failures} loading={auditLoading} hasMore={auditHasMore} loadMore={loadOlderAudit} />
+    {showAddUser && <AddUserModal onClose={() => setShowAddUser(false)} onCreated={async (user) => { if (user) setUsers((current) => [user, ...current.filter((item) => item.id !== user.id)]); else await reload(); void refreshAudit().catch(() => undefined) }} />}
   </div>
 }
 
@@ -231,14 +257,24 @@ function ModeSwitch({ user, patchUser }: { user: AdminUser; patchUser: (id: stri
   </div>
 }
 
-function AuditLog({ audit, failures }: { audit: AuditEntry[]; failures: Failure[] }) {
-  const entries = audit.slice(0, 8)
+function AuditLog({ audit, failures, loading, hasMore, loadMore }: { audit: AuditEntry[]; failures: Failure[]; loading: boolean; hasMore: boolean; loadMore: () => Promise<void> }) {
+  const entries = audit
+  const handleScroll = (event: React.UIEvent<HTMLDivElement>) => {
+    const el = event.currentTarget
+    if (!hasMore || loading) return
+    if (el.scrollHeight - el.scrollTop - el.clientHeight < 48) {
+      void loadMore()
+    }
+  }
   return <aside className="flex flex-col rounded-xl border border-[#c3c6d7] bg-white">
     <div className="border-b border-[#c3c6d7] p-6"><h3 className="text-lg font-semibold leading-[1.4] text-[#191b23]">系统审计日志</h3></div>
-    <div className="flex-1 space-y-4 p-4">
+    <div onScroll={handleScroll} className="max-h-[520px] flex-1 space-y-4 overflow-y-auto p-4 pr-3">
       {entries.length === 0 && failures.length === 0 && <AuditItem icon="✓" title="暂无活动" detail="系统操作记录会显示在这里。" time="现在" />}
       {entries.map((item) => <AuditItem key={item.id} icon={auditIcon(item.type)} title={item.title} detail={item.detail} time={new Date(item.createdAt).toLocaleString()} danger={item.type.includes('fail')} />)}
       {entries.length === 0 && failures.slice(0, 3).map((f) => <AuditItem key={f.id} icon="!" title="生图失败" detail={`${f.username}: ${f.prompt || f.error}`} time={new Date(f.createdAt).toLocaleString()} danger />)}
+      {loading && <div className="rounded-lg bg-[#faf8ff] px-3 py-2 text-center text-xs text-[#434655]">正在加载日志…</div>}
+      {!loading && hasMore && <button onClick={() => void loadMore()} className="w-full rounded-lg border border-[#c3c6d7] bg-[#faf8ff] px-3 py-2 text-xs font-medium text-[#434655] hover:bg-[#f3f3fe]">加载更旧日志</button>}
+      {!loading && !hasMore && entries.length > 0 && <div className="px-3 py-2 text-center text-xs text-[#737686]">已显示全部日志</div>}
     </div>
     <div className="rounded-b-xl border-t border-[#c3c6d7] bg-[#faf8ff] p-4 text-center text-[11px] font-bold uppercase tracking-wider text-[#191b23] dark:border-white/[0.08] dark:bg-white/[0.03]">查看详细审计日志</div>
   </aside>
