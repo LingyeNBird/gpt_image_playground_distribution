@@ -1,4 +1,4 @@
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import { initStore } from './store'
 import { useStore } from './store'
 import { normalizeBaseUrl } from './lib/api'
@@ -22,6 +22,7 @@ export default function App() {
   const setSettings = useStore((s) => s.setSettings)
   const currentUser = useStore((s) => s.currentUser)
   const authChecked = useStore((s) => s.authChecked)
+  const [showAdminPanel, setShowAdminPanel] = useState(false)
   useDockerApiUrlMigrationNotice()
 
   useEffect(() => {
@@ -81,25 +82,32 @@ export default function App() {
 
   if (!currentUser) return <LoginPage />
 
-  if (currentUser.role === 'admin') return <AdminPanel />
-
   return (
     <>
-      <Header />
-      <main data-home-main data-drag-select-surface className="pb-48">
-        <div className="safe-area-x max-w-7xl mx-auto">
-          <SearchBar />
-          <TaskGrid />
-        </div>
-      </main>
-      <InputBar />
-      <DetailModal />
-      <Lightbox />
+      <Header
+        adminButtonLabel={showAdminPanel ? '生图页' : '后台'}
+        onOpenAdmin={currentUser.role === 'admin' ? () => setShowAdminPanel((show) => !show) : undefined}
+      />
+      {currentUser.role === 'admin' && showAdminPanel ? (
+        <AdminPanel />
+      ) : (
+        <>
+          <main data-home-main data-drag-select-surface className="pb-48">
+            <div className="safe-area-x max-w-7xl mx-auto">
+              <SearchBar />
+              <TaskGrid />
+            </div>
+          </main>
+          <InputBar />
+          <DetailModal />
+          <Lightbox />
+        </>
+      )}
       <SettingsModal />
       <ConfirmDialog />
       <Toast />
-      <MaskEditorModal />
-      <ImageContextMenu />
+      {!(currentUser.role === 'admin' && showAdminPanel) && <MaskEditorModal />}
+      {!(currentUser.role === 'admin' && showAdminPanel) && <ImageContextMenu />}
     </>
   )
 }

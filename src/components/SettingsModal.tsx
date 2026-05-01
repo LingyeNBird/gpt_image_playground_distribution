@@ -1,6 +1,18 @@
 import { useEffect, useState } from 'react'
 import { useStore } from '../store'
 import { useCloseOnEscape } from '../hooks/useCloseOnEscape'
+import { apiRequest } from '../lib/backend'
+
+type AdminSettings = { baseUrl: string; apiKey: string; model: string; timeout: number; apiMode: string; codexCli: boolean }
+
+const defaultAdminSettings: AdminSettings = {
+  baseUrl: 'https://api.openai.com/v1',
+  apiKey: '',
+  model: 'gpt-image-2',
+  timeout: 300,
+  apiMode: 'images',
+  codexCli: false,
+}
 
 export default function SettingsModal() {
   const showSettings = useStore((s) => s.showSettings)
@@ -9,32 +21,57 @@ export default function SettingsModal() {
   const setSettings = useStore((s) => s.setSettings)
   const currentUser = useStore((s) => s.currentUser)
   const [deliveryMode, setDeliveryMode] = useState(settings.deliveryMode)
+  const [adminSettings, setAdminSettings] = useState<AdminSettings>(defaultAdminSettings)
+  const [message, setMessage] = useState('')
 
   useEffect(() => {
     if (showSettings) setDeliveryMode(settings.deliveryMode)
   }, [showSettings, settings.deliveryMode])
+
+  useEffect(() => {
+    if (!showSettings || currentUser?.role !== 'admin') return
+    setMessage('')
+    apiRequest<AdminSettings>('/api/admin/settings')
+      .then((data) => setAdminSettings({ ...defaultAdminSettings, ...data }))
+      .catch((err) => setMessage(`读取上游设置失败：${err instanceof Error ? err.message : String(err)}`))
+  }, [showSettings, currentUser?.role])
 
   const handleClose = () => {
     setSettings({ deliveryMode })
     setShowSettings(false)
   }
 
+  const saveAdminSettings = async () => {
+    await apiRequest('/api/admin/settings', { method: 'PUT', body: JSON.stringify(adminSettings) })
+    setSettings({
+      baseUrl: adminSettings.baseUrl,
+      apiKey: adminSettings.apiKey === '********' ? settings.apiKey : adminSettings.apiKey,
+      model: adminSettings.model,
+      timeout: adminSettings.timeout,
+      apiMode: adminSettings.apiMode === 'responses' ? 'responses' : 'images',
+      codexCli: adminSettings.codexCli,
+    })
+    setMessage('上游设置已保存')
+  }
+
   useCloseOnEscape(showSettings, handleClose)
   if (!showSettings) return null
 
-  const canDirect = currentUser?.allowDirect !== false
-  const canBucket = currentUser?.allowBucket === true
+  const isAdmin = currentUser?.role === 'admin'
+  const canDirect = isAdmin || currentUser?.allowDirect !== false
+  const canBucket = isAdmin || currentUser?.allowBucket === true
 
   return (
     <div data-no-drag-select className="fixed inset-0 z-[70] flex items-center justify-center p-4">
       <div className="absolute inset-0 bg-black/30 backdrop-blur-sm animate-overlay-in" onClick={handleClose} />
-      <div className="relative z-10 w-full max-w-md rounded-3xl border border-white/50 bg-white/95 p-5 shadow-2xl ring-1 ring-black/5 animate-modal-in dark:border-white/[0.08] dark:bg-gray-900/95 dark:ring-white/10">
+      <div className="relative z-10 max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-3xl border border-white/50 bg-white/95 p-5 shadow-2xl ring-1 ring-black/5 animate-modal-in dark:border-white/[0.08] dark:bg-gray-900/95 dark:ring-white/10">
         <div className="mb-5 flex items-center justify-between gap-4">
-          <h3 className="text-base font-semibold text-gray-800 dark:text-gray-100">用户设置</h3>
+          <h3 className="text-base font-semibold text-gray-800 dark:text-gray-100">{isAdmin ? '管理员设置' : '用户设置'}</h3>
           <button onClick={handleClose} className="rounded-full p-1 text-gray-400 transition hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-white/[0.06] dark:hover:text-gray-200" aria-label="关闭">
             <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
           </button>
         </div>
+        {message && <div className="mb-4 rounded-xl bg-green-50 px-3 py-2 text-sm text-green-600 dark:bg-green-500/10 dark:text-green-300">{message}</div>}
         <section>
           <h4 className="mb-4 text-sm font-medium text-gray-800 dark:text-gray-200">分发模式</h4>
           <div className="space-y-3">
@@ -48,6 +85,41 @@ export default function SettingsModal() {
             </label>
           </div>
         </section>
+        {isAdmin && (
+          <section className="mt-6 border-t border-gray-100 pt-5 dark:border-white/[0.08]">
+            <h4 className="mb-4 text-sm font-medium text-gray-800 dark:text-gray-200">上游接口</h4>
+            <div className="grid gap-3 md:grid-cols-2">
+              <label className="block md:col-span-2">
+                <span className="text-xs text-gray-500">上游 API URL</span>
+                <input value={adminSettings.baseUrl} onChange={(e) => setAdminSettings({ ...adminSettings, baseUrl: e.target.value })} className="mt-1 w-full rounded-xl border bg-transparent px-3 py-2" />
+              </label>
+              <label className="block md:col-span-2">
+                <span className="text-xs text-gray-500">上游 API Key</span>
+                <input type="password" value={adminSettings.apiKey} onChange={(e) => setAdminSettings({ ...adminSettings, apiKey: e.target.value })} className="mt-1 w-full rounded-xl border bg-transparent px-3 py-2" />
+              </label>
+              <label className="block">
+                <span className="text-xs text-gray-500">模型</span>
+                <input value={adminSettings.model} onChange={(e) => setAdminSettings({ ...adminSettings, model: e.target.value })} className="mt-1 w-full rounded-xl border bg-transparent px-3 py-2" />
+              </label>
+              <label className="block">
+                <span className="text-xs text-gray-500">超时秒数</span>
+                <input type="number" value={adminSettings.timeout} onChange={(e) => setAdminSettings({ ...adminSettings, timeout: Number(e.target.value) })} className="mt-1 w-full rounded-xl border bg-transparent px-3 py-2" />
+              </label>
+              <label className="block">
+                <span className="text-xs text-gray-500">接口模式</span>
+                <select value={adminSettings.apiMode} onChange={(e) => setAdminSettings({ ...adminSettings, apiMode: e.target.value })} className="mt-1 w-full rounded-xl border bg-transparent px-3 py-2">
+                  <option value="images">Images API</option>
+                  <option value="responses">Responses API</option>
+                </select>
+              </label>
+              <label className="flex items-center gap-2 text-sm">
+                <input type="checkbox" checked={adminSettings.codexCli} onChange={(e) => setAdminSettings({ ...adminSettings, codexCli: e.target.checked })} />
+                Codex CLI 兼容
+              </label>
+            </div>
+            <button onClick={saveAdminSettings} className="mt-4 rounded-xl bg-blue-500 px-4 py-2 text-white">保存上游设置</button>
+          </section>
+        )}
       </div>
     </div>
   )

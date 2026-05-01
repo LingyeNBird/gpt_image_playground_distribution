@@ -6,7 +6,7 @@ import HelpModal from './HelpModal'
 import { logout } from '../lib/backend'
 import { apiRequest } from '../lib/backend'
 
-export default function Header() {
+export default function Header({ adminButtonLabel = '后台', onOpenAdmin }: { adminButtonLabel?: string; onOpenAdmin?: () => void }) {
   const setShowSettings = useStore((s) => s.setShowSettings)
   const setCurrentUser = useStore((s) => s.setCurrentUser)
   const currentUser = useStore((s) => s.currentUser)
@@ -54,7 +54,7 @@ export default function Header() {
         </div>
         <div className="flex items-center gap-1">
           <span className="hidden sm:inline text-xs text-gray-500 mr-2">
-            {currentUser?.username} · 剩余额度 {currentUser?.quotaRemaining ?? 0}
+            {currentUser?.role === 'admin' ? '管理员' : `${currentUser?.username} · 剩余额度 ${currentUser?.quotaRemaining ?? 0}`}
           </span>
           <button
             onClick={() => setShowHelp(true)}
@@ -100,6 +100,15 @@ export default function Header() {
               />
             </svg>
           </button>
+          {currentUser?.role === 'admin' && onOpenAdmin && (
+            <button
+              onClick={onOpenAdmin}
+              className="rounded-lg px-3 py-2 text-xs font-medium text-blue-600 transition hover:bg-blue-50 dark:text-blue-300 dark:hover:bg-blue-500/10"
+              title={adminButtonLabel === '后台' ? '进入分发管理后台' : '返回生图页面'}
+            >
+              {adminButtonLabel}
+            </button>
+          )}
           <button
             onClick={async () => { await logout(); setCurrentUser(null) }}
             className="p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-900 transition-colors text-xs text-gray-500"
