@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
 import { apiRequest } from '../lib/backend'
+import { AdminButton, AdminCard, AdminInput, AdminModal, AdminNotice, AdminTag, AdminTextButton, AdminToast, MaterialIcon, adminTheme } from './adminUi'
 import { bucketConfirmCopy, bucketEditDefaults, bucketPayloadFromFields, normalizeMinuteInput, toastTypeForError } from './bucketForm'
 
 type AdminUser = { id: string; username: string; disabled: boolean; banned: boolean; quotaTotal: number; quotaUsed: number; quotaRemaining: number; allowDirect: boolean; allowBucket: boolean; online: boolean; runningTasks: number }
@@ -13,18 +14,7 @@ type UpdateCheck = { backend: UpdateInfo; frontend: UpdateInfo }
 type ToastMessage = { id: number; type: 'success' | 'error'; text: string }
 type PendingBucketSave = { payload: ReturnType<typeof bucketPayloadFromFields>; editingBucket: Bucket | null }
 
-const surfaceLow = '#f3f3fe'
-const surfaceLowest = '#ffffff'
-const surfaceBright = '#faf8ff'
-const surface = '#faf8ff'
-const outline = '#c3c6d7'
-const onSurface = '#191b23'
-const onSurfaceVariant = '#434655'
-const primary = '#004ac6'
 const auditPageSize = 30
-const inputClass = 'h-[42px] w-full rounded border border-[#c3c6d7] bg-[#f3f3fe] px-4 py-2 text-sm text-[#191b23] outline-none transition-colors placeholder:text-[#737686] focus:border-[#191b23] focus:ring-1 focus:ring-[#191b23]'
-const primaryButton = 'h-[42px] rounded bg-[#191b23] px-6 py-2 text-sm font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-60'
-const quietButton = 'h-[42px] rounded border border-[#c3c6d7] bg-white px-6 py-2 text-sm font-medium text-[#434655] transition-colors hover:bg-[#faf8ff]'
 
 export default function AdminPanel() {
   const [tab, setTab] = useState<'users' | 'storage' | 'updates'>('users')
@@ -159,7 +149,7 @@ export default function AdminPanel() {
   }
 
   return (
-    <div className="min-h-screen bg-[#f3f3fe] text-[#191b23]" style={{ fontFamily: 'Manrope, var(--font-ui-sans)' }}>
+    <div className="min-h-screen text-[#191b23]" style={{ fontFamily: 'Manrope, var(--font-ui-sans)' }}>
       <main className="mx-auto max-w-[1440px] px-8 py-10 pb-48">
       <div className="mb-6">
         <h2 className="mb-1 text-[32px] font-bold leading-[1.2] tracking-[-0.02em] text-[#191b23]">分发管理</h2>
@@ -181,7 +171,7 @@ export default function AdminPanel() {
         <StatCard label="桶内图片" value={stats.images} icon="image" />
       </div>
 
-      {toast && <Toast key={toast.id} toast={toast} onClose={() => setToast(null)} />}
+      {toast && <AdminToast key={toast.id} type={toast.type} text={toast.text} onClose={() => setToast(null)} />}
 
         {tab === 'users' && <UsersTab users={users} audit={audit} failures={failures} usersLoading={usersLoading} usersError={usersError} auditLoading={auditLoading} auditHasMore={auditHasMore} patchUser={patchUser} reload={loadUsers} setUsers={setUsers} refreshAudit={refreshAudit} loadOlderAudit={() => loadAuditPage(audit.length)} />}
       {tab === 'storage' && <StorageTab buckets={buckets} editingBucket={editingBucket} setEditingBucket={setEditingBucket} formVersion={storageFormVersion} saveBucket={saveBucket} deleteBucket={deleteBucket} />}
@@ -194,28 +184,24 @@ export default function AdminPanel() {
 }
 
 function StatCard({ label, value, icon }: { label: string; value: number; icon: string }) {
-  return <div className="flex min-h-[116px] flex-col justify-between rounded-xl border border-[#c3c6d7] bg-white p-6">
+  return <AdminCard className="flex min-h-[116px] flex-col justify-between p-6">
     <div className="mb-2 flex items-start justify-between gap-4">
       <span className="text-xs font-bold uppercase leading-none tracking-wider text-[#434655]">{label}</span>
-      <MaterialLikeIcon name={icon} className="text-[#004ac6]" />
+      <MaterialIcon name={icon} className="text-[#004ac6]" />
     </div>
     <div className="text-[32px] font-bold leading-[1.2] tracking-[-0.02em] text-[#191b23]">{value}</div>
-  </div>
-}
-
-function MaterialLikeIcon({ name, className = '' }: { name: string; className?: string }) {
-  return <span className={`material-symbols-outlined ${className}`}>{name}</span>
+  </AdminCard>
 }
 
 function UsersTab({ users, audit, failures, usersLoading, usersError, auditLoading, auditHasMore, patchUser, reload, setUsers, refreshAudit, loadOlderAudit }: { users: AdminUser[]; audit: AuditEntry[]; failures: Failure[]; usersLoading: boolean; usersError: string; auditLoading: boolean; auditHasMore: boolean; patchUser: (id: string, patch: Partial<AdminUser>) => Promise<void>; reload: () => Promise<void>; setUsers: React.Dispatch<React.SetStateAction<AdminUser[]>>; refreshAudit: () => Promise<void>; loadOlderAudit: () => Promise<void> }) {
   const [showAddUser, setShowAddUser] = useState(false)
 
   return <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
-    <section className="rounded-xl border border-[#c3c6d7] bg-white lg:col-span-2">
+    <AdminCard className="lg:col-span-2">
       <div className="p-6">
         <div className="mb-4 flex items-center justify-between gap-4">
           <h3 className="text-lg font-semibold leading-[1.4] text-[#191b23]">用户管理</h3>
-          <button onClick={() => setShowAddUser(true)} className={primaryButton}>+ 添加用户</button>
+          <AdminButton variant="primary" icon="add" onClick={() => setShowAddUser(true)}>添加用户</AdminButton>
         </div>
       <div className="overflow-x-auto">
         <table className="w-full min-w-[850px] border-collapse text-left text-sm">
@@ -224,12 +210,12 @@ function UsersTab({ users, audit, failures, usersLoading, usersError, auditLoadi
             {usersLoading && <tr><td colSpan={6} className="px-2 py-8 text-center text-[#434655]">正在加载用户列表…</td></tr>}
             {!usersLoading && usersError && <tr><td colSpan={6} className="px-2 py-8 text-center text-[#ba1a1a]">用户列表加载失败：{usersError}</td></tr>}
             {!usersLoading && !usersError && users.length === 0 && <tr><td colSpan={6} className="px-2 py-8 text-center text-[#434655]">暂无用户。使用上方表单添加用户，或让用户在登录页注册。</td></tr>}
-            {!usersLoading && !usersError && users.map((u) => <tr key={u.id} className={`border-b border-[#e1e2ed] transition-colors hover:bg-[#faf8ff] ${u.banned ? 'bg-[#ffdad6]/20' : ''}`}><td className="px-2 py-4"><div className="flex items-center gap-2"><Avatar name={u.username} muted={u.banned} /><div><div className={`text-sm font-medium leading-none ${u.banned ? 'text-[#ba1a1a]' : 'text-[#191b23]'}`}>{u.username || '未命名用户'}</div><div className="mt-1 text-xs text-[#434655]">ID: {u.id.slice(0, 4)}</div></div></div></td><td className="px-2 py-4"><StatusPill user={u} /></td><td className="px-2 py-4">{u.runningTasks}</td><td className="px-2 py-4"><input type="number" defaultValue={u.quotaTotal} onBlur={(e) => { const next = Number(e.target.value); if (next !== u.quotaTotal) void patchUser(u.id, { quotaTotal: next }) }} className="w-16 border-0 border-b border-[#c3c6d7] bg-transparent px-1 py-0.5 text-center text-sm focus:border-[#191b23] focus:ring-0" /></td><td className="px-2 py-4"><ModeSwitch user={u} patchUser={patchUser} /></td><td className="px-2 py-4"><button onClick={() => patchUser(u.id, { banned: !u.banned })} className="text-xs font-medium text-[#ba1a1a] hover:opacity-80">{u.banned ? '解封' : '封禁'}</button></td></tr>)}
+            {!usersLoading && !usersError && users.map((u) => <tr key={u.id} className={`border-b border-[#e1e2ed] transition-colors hover:bg-[#faf8ff] ${u.banned ? 'bg-[#ffdad6]/20' : ''}`}><td className="px-2 py-4"><div className="flex items-center gap-2"><Avatar name={u.username} muted={u.banned} /><div><div className={`text-sm font-medium leading-none ${u.banned ? 'text-[#ba1a1a]' : 'text-[#191b23]'}`}>{u.username || '未命名用户'}</div><div className="mt-1 text-xs text-[#434655]">ID: {u.id.slice(0, 4)}</div></div></div></td><td className="px-2 py-4"><StatusPill user={u} /></td><td className="px-2 py-4">{u.runningTasks}</td><td className="px-2 py-4"><input type="number" defaultValue={u.quotaTotal} onBlur={(e) => { const next = Number(e.target.value); if (next !== u.quotaTotal) void patchUser(u.id, { quotaTotal: next }) }} className="w-16 border-0 border-b border-[#c3c6d7] bg-transparent px-1 py-0.5 text-center text-sm focus:border-[#191b23] focus:ring-0" /></td><td className="px-2 py-4"><ModeSwitch user={u} patchUser={patchUser} /></td><td className="px-2 py-4"><AdminTextButton tone="danger" onClick={() => patchUser(u.id, { banned: !u.banned })}>{u.banned ? '解封' : '封禁'}</AdminTextButton></td></tr>)}
           </tbody>
         </table>
       </div>
       </div>
-    </section>
+    </AdminCard>
     <AuditLog audit={audit} failures={failures} loading={auditLoading} hasMore={auditHasMore} loadMore={loadOlderAudit} />
     {showAddUser && <AddUserModal onClose={() => setShowAddUser(false)} onCreated={async (user) => { if (user) setUsers((current) => [user, ...current.filter((item) => item.id !== user.id)]); else await reload(); void refreshAudit().catch(() => undefined) }} />}
   </div>
@@ -261,57 +247,17 @@ function AddUserModal({ onClose, onCreated }: { onClose: () => void; onCreated: 
     }
   }
 
-  return <div className="fixed inset-0 z-[80] flex items-center justify-center bg-zinc-900/40 p-4 backdrop-blur-sm" onMouseDown={onClose}>
-    <form onSubmit={submit} onMouseDown={(e) => e.stopPropagation()} className="flex w-full max-w-[480px] flex-col overflow-hidden rounded-xl border border-[#c3c6d7] bg-white shadow-[0_4px_24px_rgba(0,0,0,0.04)]">
-      <div className="border-b border-[#c3c6d7]/30 p-6 pb-4">
-        <h3 className="mb-2 text-2xl font-semibold leading-[1.3] tracking-[-0.01em] text-[#191b23]">添加用户</h3>
-        <p className="text-sm leading-[1.5] text-[#434655]">创建一个默认额度为 0 的分发用户。稍后可在用户表格中调整额度和模式。</p>
-      </div>
-      <div className="space-y-4 p-6">
-        {notice && <ModalNotice type={notice.type}>{notice.text}</ModalNotice>}
-        <label className="flex flex-col gap-2"><span className="text-xs font-bold uppercase leading-none tracking-wider text-[#191b23]">用户名</span><input autoFocus placeholder="例如：metropolitan_admin" value={username} onChange={(e) => setUsername(e.target.value)} className="h-10 w-full rounded-lg border border-[#c3c6d7] bg-[#f3f3fe] px-3 text-sm leading-[1.5] text-[#191b23] outline-none placeholder:text-[#737686] focus:border-[#191b23] focus:ring-0" /></label>
-        <label className="flex flex-col gap-2"><span className="text-xs font-bold uppercase leading-none tracking-wider text-[#191b23]">密码</span><input placeholder="请输入密码" value={password} onChange={(e) => setPassword(e.target.value)} type="password" className="h-10 w-full rounded-lg border border-[#c3c6d7] bg-[#f3f3fe] px-3 text-sm leading-[1.5] text-[#191b23] outline-none placeholder:text-[#737686] focus:border-[#191b23] focus:ring-0" /></label>
-      </div>
-      <div className="flex justify-end gap-3 border-t border-[#c3c6d7]/30 bg-[#faf8ff] p-6 pt-4">
-        <button type="button" onClick={onClose} className="rounded-lg border border-[#c3c6d7] bg-white px-6 py-2 text-sm font-medium leading-none text-[#191b23] transition-colors hover:bg-[#f3f3fe]">取消</button>
-        <button disabled={saving} className="rounded-lg bg-[#191b23] px-6 py-2 text-sm font-medium leading-none text-white transition-colors hover:bg-[#191b23]/90 disabled:opacity-60">{saving ? '创建中…' : '创建用户'}</button>
-      </div>
-    </form>
-  </div>
-}
-
-function ModalNotice({ type, children }: { type: 'success' | 'error'; children: ReactNode }) {
-  const isError = type === 'error'
-  return <div className={`flex items-start gap-3 rounded-lg border px-4 py-3 ${isError ? 'border-[#ba1a1a]/20 bg-[#ffdad6] text-[#93000a]' : 'border-[#c3c6d7]/50 bg-[#ededf9] text-[#191b23]'}`}>
-    <MaterialLikeIcon name={isError ? 'error' : 'check_circle'} className={`mt-0.5 text-[20px] ${isError ? '' : 'text-[#004ac6]'}`} />
-    <p className="text-sm font-medium leading-[1.5]">{children}</p>
-  </div>
-}
-
-function Toast({ toast, onClose }: { toast: ToastMessage; onClose: () => void }) {
-  const isError = toast.type === 'error'
-  return <div className={`fixed right-6 top-6 z-[120] flex max-w-[420px] items-start gap-3 rounded-xl border px-4 py-3 shadow-[0_12px_32px_rgba(0,0,0,0.12)] ${isError ? 'border-[#ba1a1a]/20 bg-[#ffdad6] text-[#93000a]' : 'border-[#c3c6d7] bg-white text-[#191b23]'}`}>
-    <MaterialLikeIcon name={isError ? 'error' : 'check_circle'} className={`mt-0.5 text-[20px] ${isError ? '' : 'text-[#004ac6]'}`} />
-    <p className="min-w-0 flex-1 text-sm font-medium leading-[1.5]">{toast.text}</p>
-    <button type="button" onClick={onClose} className="text-lg leading-none opacity-60 hover:opacity-100">×</button>
-  </div>
+  return <form onSubmit={submit}><AdminModal title="添加用户" description="创建一个默认额度为 0 的分发用户。稍后可在用户表格中调整额度和模式。" onClose={onClose} footer={<><AdminButton type="button" variant="secondary" onClick={onClose}>取消</AdminButton><AdminButton disabled={saving} variant="primary">{saving ? '创建中…' : '创建用户'}</AdminButton></>}>
+    {notice && <AdminNotice type={notice.type}>{notice.text}</AdminNotice>}
+    <label className="flex flex-col gap-2"><span className="text-xs font-bold uppercase leading-none tracking-wider text-[#191b23]">用户名</span><AdminInput autoFocus placeholder="例如：metropolitan_admin" value={username} onChange={(e) => setUsername(e.target.value)} /></label>
+    <label className="flex flex-col gap-2"><span className="text-xs font-bold uppercase leading-none tracking-wider text-[#191b23]">密码</span><AdminInput placeholder="请输入密码" value={password} onChange={(e) => setPassword(e.target.value)} type="password" /></label>
+  </AdminModal></form>
 }
 
 function BucketConfirmModal({ action, bucketName, onCancel, onConfirm }: { action: 'add' | 'delete'; bucketName: string; onCancel: () => void; onConfirm: () => void }) {
   const copy = bucketConfirmCopy(action, bucketName)
   const isDelete = action === 'delete'
-  return <div className="fixed inset-0 z-[100] flex items-center justify-center bg-zinc-900/40 p-4 backdrop-blur-sm" onMouseDown={onCancel}>
-    <div onMouseDown={(e) => e.stopPropagation()} className="flex w-full max-w-[460px] flex-col overflow-hidden rounded-xl border border-[#c3c6d7] bg-white shadow-[0_4px_24px_rgba(0,0,0,0.08)]">
-      <div className="border-b border-[#c3c6d7]/30 p-6 pb-4">
-        <h3 className="mb-2 text-2xl font-semibold leading-[1.3] tracking-[-0.01em] text-[#191b23]">{copy.title}</h3>
-        <p className="text-sm leading-[1.6] text-[#434655]">{copy.detail}</p>
-      </div>
-      <div className="flex justify-end gap-3 border-t border-[#c3c6d7]/30 bg-[#faf8ff] p-6 pt-4">
-        <button type="button" onClick={onCancel} className="rounded-lg border border-[#c3c6d7] bg-white px-6 py-2 text-sm font-medium leading-none text-[#191b23] transition-colors hover:bg-[#f3f3fe]">取消</button>
-        <button type="button" onClick={onConfirm} className={`rounded-lg px-6 py-2 text-sm font-medium leading-none text-white transition-colors ${isDelete ? 'bg-[#ba1a1a] hover:bg-[#93000a]' : 'bg-[#191b23] hover:bg-[#191b23]/90'}`}>{copy.confirmText}</button>
-      </div>
-    </div>
-  </div>
+  return <AdminModal title={copy.title} description={copy.detail} onClose={onCancel} zIndex="z-[100]" maxWidth="max-w-[460px]" footer={<><AdminButton type="button" variant="secondary" onClick={onCancel}>取消</AdminButton><AdminButton type="button" variant={isDelete ? 'danger' : 'primary'} onClick={onConfirm}>{copy.confirmText}</AdminButton></>} />
 }
 
 function InlineNotice({ type, children }: { type: 'success' | 'error'; children: ReactNode }) {
@@ -326,17 +272,17 @@ function Avatar({ name, muted }: { name: string; muted?: boolean }) {
 }
 
 function StatusPill({ user }: { user: AdminUser }) {
-  if (user.banned) return <span className="inline-flex items-center rounded-full border border-red-200 bg-red-50 px-2 py-1 text-xs font-medium text-red-700">封禁</span>
-  if (user.runningTasks > 0) return <span className="inline-flex items-center rounded-full border border-[#b4c5ff] bg-[#dbe1ff] px-2 py-1 text-xs font-medium text-[#00174b]"><span className="mr-1.5 h-1.5 w-1.5 rounded-full bg-[#004ac6]" />生成中</span>
-  if (user.online) return <span className="inline-flex items-center rounded-full border border-[#c3c6d7] bg-[#ededf9] px-2 py-1 text-xs font-medium text-[#191b23]"><span className="mr-1.5 h-1.5 w-1.5 rounded-full bg-green-500" />在线</span>
-  return <span className="inline-flex items-center rounded-full border border-[#c3c6d7] bg-[#ededf9] px-2 py-1 text-xs font-medium text-[#434655]">离线</span>
+  if (user.banned) return <AdminTag tone="danger">封禁</AdminTag>
+  if (user.runningTasks > 0) return <AdminTag tone="primary"><span className="mr-1.5 h-1.5 w-1.5 rounded-full bg-[#004ac6]" />生成中</AdminTag>
+  if (user.online) return <AdminTag tone="info"><span className="mr-1.5 h-1.5 w-1.5 rounded-full bg-green-500" />在线</AdminTag>
+  return <AdminTag>离线</AdminTag>
 }
 
 function ModeSwitch({ user, patchUser }: { user: AdminUser; patchUser: (id: string, patch: Partial<AdminUser>) => Promise<void> }) {
   const modeClass = (enabled: boolean) => `rounded-md border px-2.5 py-1 text-xs font-semibold transition-colors ${enabled ? 'border-[#191b23] bg-[#191b23] text-white shadow-sm' : 'border-[#c3c6d7] bg-white text-[#434655] hover:border-[#191b23] hover:text-[#191b23]'}`
   return <div className="flex w-fit gap-1.5 rounded-lg p-1">
-    <button onClick={() => patchUser(user.id, { allowDirect: !user.allowDirect })} className={modeClass(user.allowDirect)}>直传</button>
-    <button onClick={() => patchUser(user.id, { allowBucket: !user.allowBucket })} className={modeClass(user.allowBucket)}>存储桶</button>
+    <button type="button" onClick={() => patchUser(user.id, { allowDirect: !user.allowDirect })} className={modeClass(user.allowDirect)}>直传</button>
+    <button type="button" onClick={() => patchUser(user.id, { allowBucket: !user.allowBucket })} className={modeClass(user.allowBucket)}>存储桶</button>
   </div>
 }
 
@@ -349,17 +295,17 @@ function AuditLog({ audit, failures, loading, hasMore, loadMore }: { audit: Audi
       void loadMore()
     }
   }
-  return <aside className="flex flex-col self-start rounded-xl border border-[#c3c6d7] bg-white">
+  return <AdminCard className="flex flex-col self-start">
     <div className="border-b border-[#c3c6d7] p-6"><h3 className="text-lg font-semibold leading-[1.4] text-[#191b23]">系统审计日志</h3></div>
     <div onScroll={handleScroll} className="max-h-[520px] flex-1 space-y-4 overflow-y-auto p-4 pr-3">
       {entries.length === 0 && failures.length === 0 && <AuditItem icon="✓" title="暂无活动" detail="系统操作记录会显示在这里。" time="现在" />}
       {entries.map((item) => <AuditItem key={item.id} icon={auditIcon(item.type)} title={item.title} detail={item.detail} time={new Date(item.createdAt).toLocaleString()} danger={item.type.includes('fail')} />)}
       {entries.length === 0 && failures.slice(0, 3).map((f) => <AuditItem key={f.id} icon="!" title="生图失败" detail={`${f.username}: ${f.prompt || f.error}`} time={new Date(f.createdAt).toLocaleString()} danger />)}
       {loading && <div className="rounded-lg bg-[#faf8ff] px-3 py-2 text-center text-xs text-[#434655]">正在加载日志…</div>}
-      {!loading && hasMore && <button onClick={() => void loadMore()} className="w-full rounded-lg border border-[#c3c6d7] bg-[#faf8ff] px-3 py-2 text-xs font-medium text-[#434655] hover:bg-[#f3f3fe]">加载更旧日志</button>}
+      {!loading && hasMore && <AdminButton variant="secondary" onClick={() => void loadMore()} className="h-auto w-full rounded-lg bg-[#faf8ff] px-3 py-2 text-xs">加载更旧日志</AdminButton>}
       {!loading && !hasMore && entries.length > 0 && <div className="px-3 py-2 text-center text-xs text-[#737686]">已显示全部日志</div>}
     </div>
-  </aside>
+  </AdminCard>
 }
 
 function auditIcon(type: string) {
@@ -391,12 +337,44 @@ function UpdatesTab({ setGlobalMessage }: { setGlobalMessage: (msg: string) => v
     try { await apiRequest('/api/admin/update/restart', { method: 'POST' }); setMessage('服务正在重启，请稍后刷新页面') } finally { setBusy(false) }
   }
   useEffect(() => { void check() }, [])
-  const row = (label: string, data: UpdateInfo | undefined, part: 'backend' | 'frontend') => <div className="rounded-xl border border-[#c3c6d7] bg-white p-6"><div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between"><div><div className="font-semibold">{label}</div><div className="mt-1 text-sm text-[#434655]">当前 {data?.currentVersion || '-'} · 最新 {data?.latestVersion || '-'}</div>{data?.assetName && <div className="mt-2 font-mono text-xs text-[#434655]">{data.assetName}</div>}</div><button disabled={busy || !data?.updateAvailable} onClick={() => update(part)} className={primaryButton}>{data?.updateAvailable ? '更新' : '已是最新'}</button></div></div>
-  return <div className="grid gap-6 lg:grid-cols-[1fr_320px]"><div className="space-y-4">{row('后端二进制', info?.backend, 'backend')}{row('前端静态资源', info?.frontend, 'frontend')}</div><aside className="rounded-xl border border-[#c3c6d7] bg-white p-6"><div className="font-semibold">Release 控制台</div><p className="mt-2 text-sm leading-6 text-[#434655]">检查 GitHub Release 中的前后端独立版本，并按需更新。</p><div className="mt-5 grid gap-2"><button disabled={busy} onClick={check} className={quietButton}>检查更新</button><button disabled={busy} onClick={restart} className="h-[36px] rounded bg-red-600 px-4 text-sm font-medium text-white disabled:bg-zinc-300">重启后端</button></div>{message && <div className="mt-4 rounded-lg bg-[#f3f3fe] px-3 py-2 text-sm text-[#434655]">{message}</div>}</aside></div>
+  const row = (label: string, data: UpdateInfo | undefined, part: 'backend' | 'frontend') => <AdminCard className="p-6"><div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between"><div><div className="font-semibold">{label}</div><div className="mt-1 text-sm text-[#434655]">当前 {data?.currentVersion || '-'} · 最新 {data?.latestVersion || '-'}</div>{data?.assetName && <div className="mt-2 font-mono text-xs text-[#434655]">{data.assetName}</div>}</div><AdminButton disabled={busy || !data?.updateAvailable} onClick={() => update(part)} variant="primary">{data?.updateAvailable ? '更新' : '已是最新'}</AdminButton></div></AdminCard>
+  return <div className="grid gap-6 lg:grid-cols-[1fr_320px]"><div className="space-y-4">{row('后端二进制', info?.backend, 'backend')}{row('前端静态资源', info?.frontend, 'frontend')}</div><AdminCard className="p-6"><div className="font-semibold">Release 控制台</div><p className="mt-2 text-sm leading-6 text-[#434655]">检查 GitHub Release 中的前后端独立版本，并按需更新。</p><div className="mt-5 grid gap-2"><AdminButton disabled={busy} onClick={check} variant="secondary">检查更新</AdminButton><AdminButton disabled={busy} onClick={restart} variant="danger">重启后端</AdminButton></div>{message && <div className="mt-4 rounded-lg bg-[#f3f3fe] px-3 py-2 text-sm text-[#434655]">{message}</div>}</AdminCard></div>
 }
 
 function StorageTab({ buckets, editingBucket, setEditingBucket, formVersion, saveBucket, deleteBucket }: { buckets: Bucket[]; editingBucket: Bucket | null; setEditingBucket: (bucket: Bucket | null) => void; formVersion: number; saveBucket: (e: React.FormEvent<HTMLFormElement>) => Promise<void>; deleteBucket: (bucket: Bucket) => Promise<void> }) {
   const formKey = `${editingBucket?.id ?? 'new-bucket'}-${formVersion}`
   const defaults = bucketEditDefaults(editingBucket)
-  return <div className="grid gap-6 lg:grid-cols-[420px_minmax(0,1fr)]"><form key={formKey} onSubmit={saveBucket} className="rounded-xl border border-[#c3c6d7] bg-white p-6"><div className="flex items-center justify-between gap-3"><h3 className="text-lg font-semibold">{editingBucket ? '编辑 COS 存储桶' : '连接 COS 存储桶'}</h3>{editingBucket && <button type="button" onClick={() => setEditingBucket(null)} className="text-xs font-medium text-[#434655] hover:text-[#191b23]">取消编辑</button>}</div><p className="mt-2 text-sm leading-6 text-[#434655]">配置后可为用户启用存储桶模式，降低直传带宽压力。</p><div className="mt-5 grid gap-3"><input name="name" defaultValue={defaults.name} placeholder="名称" className={inputClass} /><input name="region" defaultValue={defaults.region} placeholder="地域 Region，例如 ap-nanjing" className={inputClass} /><input name="bucket" defaultValue={defaults.bucket} placeholder="Bucket，例如 gptimage-1325670071" className={inputClass} /><input name="secretId" defaultValue={defaults.secretId} placeholder="SecretId" className={inputClass} /><input name="secretKey" defaultValue={defaults.secretKey} placeholder="SecretKey" type="password" className={inputClass} /><input name="pathPrefix" defaultValue={defaults.pathPrefix} placeholder="路径前缀 images" className={inputClass} /><input name="tempUrlMinutes" defaultValue={defaults.tempUrlMinutes} placeholder="临时链接分钟数，可填 60*24" inputMode="decimal" onBlur={(e) => normalizeMinuteInput(e.currentTarget)} onKeyDown={(e) => { if (e.key === 'Enter') normalizeMinuteInput(e.currentTarget) }} className={inputClass} /><button className={`${primaryButton} mt-2`}>{editingBucket ? '保存修改' : '添加存储桶'}</button></div></form><section className="rounded-xl border border-[#c3c6d7] bg-white p-6"><div className="flex items-center justify-between"><h3 className="text-lg font-semibold">存储资产</h3><span className="text-xs text-[#434655]">{buckets.length} 个桶</span></div><div className="mt-5 grid gap-3 md:grid-cols-2">{buckets.length === 0 && <div className="rounded-lg bg-[#faf8ff] p-4 text-sm text-[#434655]">暂无存储桶</div>}{buckets.map((b) => <div key={b.id} className={`rounded-lg border p-4 ${editingBucket?.id === b.id ? 'border-[#191b23] bg-white' : 'border-[#c3c6d7] bg-[#faf8ff]'}`}><div className="flex items-center justify-between gap-3"><div className="font-medium">{b.name}</div><div className="rounded-full bg-[#ededf9] px-2 py-1 text-xs text-[#434655]">{b.imageCount} 张</div></div><div className="mt-3 break-all font-mono text-xs leading-5 text-[#434655]">{b.bucket} · {b.region}</div><div className="mt-3 text-xs text-[#434655]">前缀 {b.pathPrefix || '-'} · 临时链接 {b.tempUrlMinutes} 分钟</div><div className="mt-4 flex items-center gap-4"><button type="button" onClick={() => setEditingBucket(b)} className="text-xs font-semibold text-[#004ac6] hover:opacity-80">编辑</button><button type="button" onClick={() => void deleteBucket(b)} className="text-xs font-semibold text-[#ba1a1a] hover:opacity-80">删除</button></div></div>)}</div></section></div>
+  return <div className="grid gap-6 lg:grid-cols-[420px_minmax(0,1fr)]">
+    <AdminCard className="p-6">
+      <form key={formKey} onSubmit={saveBucket}>
+        <div className="flex items-center justify-between gap-3">
+          <h3 className="text-lg font-semibold">{editingBucket ? '编辑 COS 存储桶' : '连接 COS 存储桶'}</h3>
+          {editingBucket && <AdminTextButton type="button" tone="default" onClick={() => setEditingBucket(null)}>取消编辑</AdminTextButton>}
+        </div>
+        <p className="mt-2 text-sm leading-6 text-[#434655]">配置后可为用户启用存储桶模式，降低直传带宽压力。</p>
+        <div className="mt-5 grid gap-3">
+          <AdminInput name="name" defaultValue={defaults.name} placeholder="名称" />
+          <AdminInput name="region" defaultValue={defaults.region} placeholder="地域 Region，例如 ap-nanjing" />
+          <AdminInput name="bucket" defaultValue={defaults.bucket} placeholder="Bucket，例如 gptimage-1325670071" />
+          <AdminInput name="secretId" defaultValue={defaults.secretId} placeholder="SecretId" />
+          <AdminInput name="secretKey" defaultValue={defaults.secretKey} placeholder="SecretKey" type="password" />
+          <AdminInput name="pathPrefix" defaultValue={defaults.pathPrefix} placeholder="路径前缀 images" />
+          <AdminInput name="tempUrlMinutes" defaultValue={defaults.tempUrlMinutes} placeholder="临时链接分钟数，可填 60*24" inputMode="decimal" onBlur={(e) => normalizeMinuteInput(e.currentTarget)} onKeyDown={(e) => { if (e.key === 'Enter') normalizeMinuteInput(e.currentTarget) }} />
+          <AdminButton variant="primary" className="mt-2">{editingBucket ? '保存修改' : '添加存储桶'}</AdminButton>
+        </div>
+      </form>
+    </AdminCard>
+    <AdminCard className="p-6">
+      <div className="flex items-center justify-between"><h3 className="text-lg font-semibold">存储资产</h3><span className="text-xs text-[#434655]">{buckets.length} 个桶</span></div>
+      <div className="mt-5 grid gap-3 md:grid-cols-2">
+        {buckets.length === 0 && <div className="rounded-lg bg-[#faf8ff] p-4 text-sm text-[#434655]">暂无存储桶</div>}
+        {buckets.map((b) => <div key={b.id} className={`rounded-lg border p-4 ${editingBucket?.id === b.id ? 'border-[#191b23] bg-white' : 'border-[#c3c6d7] bg-[#faf8ff]'}`}>
+          <div className="flex items-center justify-between gap-3"><div className="font-medium">{b.name}</div><AdminTag>{b.imageCount} 张</AdminTag></div>
+          <div className="mt-3 break-all font-mono text-xs leading-5 text-[#434655]">{b.bucket} · {b.region}</div>
+          <div className="mt-3 text-xs text-[#434655]">前缀 {b.pathPrefix || '-'} · 临时链接 {b.tempUrlMinutes} 分钟</div>
+          <div className="mt-4 flex items-center gap-4"><AdminTextButton type="button" onClick={() => setEditingBucket(b)}>编辑</AdminTextButton><AdminTextButton type="button" tone="danger" onClick={() => void deleteBucket(b)}>删除</AdminTextButton></div>
+        </div>)}
+      </div>
+    </AdminCard>
+  </div>
 }
