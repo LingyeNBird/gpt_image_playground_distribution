@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
 import { apiRequest } from '../lib/backend'
-import { bucketEditDefaults, bucketPayloadFromFields, normalizeMinuteInput } from './bucketForm'
+import { bucketConfirmCopy, bucketEditDefaults, bucketPayloadFromFields, normalizeMinuteInput, toastTypeForError } from './bucketForm'
 
 type AdminUser = { id: string; username: string; disabled: boolean; banned: boolean; quotaTotal: number; quotaUsed: number; quotaRemaining: number; allowDirect: boolean; allowBucket: boolean; online: boolean; runningTasks: number }
 type Bucket = { id: string; name: string; region: string; bucket: string; secretId: string; secretKey: string; pathPrefix: string; tempUrlMinutes: number; imageCount: number }
@@ -10,6 +10,8 @@ type AuditEntry = { id: string; type: string; title: string; detail: string; use
 type AuditPage = { audit: AuditEntry[]; total: number; offset: number; limit: number; hasMore: boolean }
 type UpdateInfo = { currentVersion: string; latestVersion: string; updateAvailable: boolean; assetName?: string }
 type UpdateCheck = { backend: UpdateInfo; frontend: UpdateInfo }
+type ToastMessage = { id: number; type: 'success' | 'error'; text: string }
+type PendingBucketSave = { payload: ReturnType<typeof bucketPayloadFromFields>; editingBucket: Bucket | null }
 
 const surfaceLow = '#f3f3fe'
 const surfaceLowest = '#ffffff'
@@ -32,8 +34,11 @@ export default function AdminPanel() {
   const [audit, setAudit] = useState<AuditEntry[]>([])
   const [auditHasMore, setAuditHasMore] = useState(false)
   const [auditLoading, setAuditLoading] = useState(false)
-  const [message, setMessage] = useState('')
+  const [toast, setToast] = useState<ToastMessage | null>(null)
   const [editingBucket, setEditingBucket] = useState<Bucket | null>(null)
+  const [pendingBucketSave, setPendingBucketSave] = useState<PendingBucketSave | null>(null)
+  const [pendingBucketDelete, setPendingBucketDelete] = useState<Bucket | null>(null)
+  const [storageFormVersion, setStorageFormVersion] = useState(0)
   const [usersLoading, setUsersLoading] = useState(true)
   const [usersError, setUsersError] = useState('')
 
@@ -83,6 +88,10 @@ export default function AdminPanel() {
 
   useEffect(() => { void load() }, [])
 
+  const showToast = (text: string, error: unknown = null) => {
+    setToast({ id: Date.now(), type: toastTypeForError(error), text })
+  }
+
   const stats = useMemo(() => ({
     online: users.filter((u) => u.online).length,
     running: users.reduce((sum, u) => sum + u.runningTasks, 0),
@@ -100,40 +109,52 @@ export default function AdminPanel() {
 
   const saveBucket = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault()
-    setMessage('')
     const form = e.currentTarget
     const fd = new FormData(form)
     let payload: ReturnType<typeof bucketPayloadFromFields>
     try {
       payload = bucketPayloadFromFields(Object.fromEntries(fd.entries()) as Record<string, FormDataEntryValue>)
     } catch (err) {
-      setMessage(`添加存储桶失败：${err instanceof Error ? err.message : String(err)}`)
+      showToast(`${editingBucket ? '更新' : '添加'}存储桶失败：${err instanceof Error ? err.message : String(err)}`, err)
       return
     }
+    if (editingBucket) {
+      await executeBucketSave({ payload, editingBucket })
+      return
+    }
+    setPendingBucketSave({ payload, editingBucket: null })
+  }
+
+  const executeBucketSave = async (pending: PendingBucketSave) => {
     try {
-      if (editingBucket) {
-        await apiRequest(`/api/admin/buckets/${editingBucket.id}`, { method: 'PUT', body: JSON.stringify(payload) })
+      if (pending.editingBucket) {
+        await apiRequest(`/api/admin/buckets/${pending.editingBucket.id}`, { method: 'PUT', body: JSON.stringify(pending.payload) })
       } else {
-        await apiRequest('/api/admin/buckets', { method: 'POST', body: JSON.stringify(payload) })
+        await apiRequest('/api/admin/buckets', { method: 'POST', body: JSON.stringify(pending.payload) })
       }
-      form.reset()
+      setStorageFormVersion((version) => version + 1)
       setEditingBucket(null)
-      setMessage(editingBucket ? '存储桶已更新' : '存储桶已添加')
+      setPendingBucketSave(null)
+      showToast(pending.editingBucket ? '存储桶已更新' : '存储桶已添加')
       await load()
     } catch (err) {
-      setMessage(`${editingBucket ? '更新' : '添加'}存储桶失败：${err instanceof Error ? err.message : String(err)}`)
+      showToast(`${pending.editingBucket ? '更新' : '添加'}存储桶失败：${err instanceof Error ? err.message : String(err)}`, err)
     }
   }
 
   const deleteBucket = async (bucket: Bucket) => {
-    setMessage('')
+    setPendingBucketDelete(bucket)
+  }
+
+  const executeBucketDelete = async (bucket: Bucket) => {
     try {
       await apiRequest(`/api/admin/buckets/${bucket.id}`, { method: 'DELETE' })
       if (editingBucket?.id === bucket.id) setEditingBucket(null)
-      setMessage('存储桶已删除')
+      setPendingBucketDelete(null)
+      showToast('存储桶已删除')
       await load()
     } catch (err) {
-      setMessage(`删除存储桶失败：${err instanceof Error ? err.message : String(err)}`)
+      showToast(`删除存储桶失败：${err instanceof Error ? err.message : String(err)}`, err)
     }
   }
 
@@ -160,12 +181,14 @@ export default function AdminPanel() {
         <StatCard label="桶内图片" value={stats.images} icon="image" />
       </div>
 
-      {message && <div className="mb-4 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700 dark:border-emerald-500/20 dark:bg-emerald-500/10 dark:text-emerald-300">{message}</div>}
+      {toast && <Toast key={toast.id} toast={toast} onClose={() => setToast(null)} />}
 
         {tab === 'users' && <UsersTab users={users} audit={audit} failures={failures} usersLoading={usersLoading} usersError={usersError} auditLoading={auditLoading} auditHasMore={auditHasMore} patchUser={patchUser} reload={loadUsers} setUsers={setUsers} refreshAudit={refreshAudit} loadOlderAudit={() => loadAuditPage(audit.length)} />}
-      {tab === 'storage' && <StorageTab buckets={buckets} editingBucket={editingBucket} setEditingBucket={setEditingBucket} saveBucket={saveBucket} deleteBucket={deleteBucket} />}
-      {tab === 'updates' && <UpdatesTab setGlobalMessage={setMessage} />}
+      {tab === 'storage' && <StorageTab buckets={buckets} editingBucket={editingBucket} setEditingBucket={setEditingBucket} formVersion={storageFormVersion} saveBucket={saveBucket} deleteBucket={deleteBucket} />}
+      {tab === 'updates' && <UpdatesTab setGlobalMessage={(msg) => showToast(msg)} />}
       </main>
+      {pendingBucketSave && <BucketConfirmModal action="add" bucketName={pendingBucketSave.payload.name || pendingBucketSave.payload.bucket} onCancel={() => setPendingBucketSave(null)} onConfirm={() => void executeBucketSave(pendingBucketSave)} />}
+      {pendingBucketDelete && <BucketConfirmModal action="delete" bucketName={pendingBucketDelete.name} onCancel={() => setPendingBucketDelete(null)} onConfirm={() => void executeBucketDelete(pendingBucketDelete)} />}
     </div>
   )
 }
@@ -265,6 +288,32 @@ function ModalNotice({ type, children }: { type: 'success' | 'error'; children: 
   </div>
 }
 
+function Toast({ toast, onClose }: { toast: ToastMessage; onClose: () => void }) {
+  const isError = toast.type === 'error'
+  return <div className={`fixed right-6 top-6 z-[120] flex max-w-[420px] items-start gap-3 rounded-xl border px-4 py-3 shadow-[0_12px_32px_rgba(0,0,0,0.12)] ${isError ? 'border-[#ba1a1a]/20 bg-[#ffdad6] text-[#93000a]' : 'border-[#c3c6d7] bg-white text-[#191b23]'}`}>
+    <MaterialLikeIcon name={isError ? 'error' : 'check_circle'} className={`mt-0.5 text-[20px] ${isError ? '' : 'text-[#004ac6]'}`} />
+    <p className="min-w-0 flex-1 text-sm font-medium leading-[1.5]">{toast.text}</p>
+    <button type="button" onClick={onClose} className="text-lg leading-none opacity-60 hover:opacity-100">×</button>
+  </div>
+}
+
+function BucketConfirmModal({ action, bucketName, onCancel, onConfirm }: { action: 'add' | 'delete'; bucketName: string; onCancel: () => void; onConfirm: () => void }) {
+  const copy = bucketConfirmCopy(action, bucketName)
+  const isDelete = action === 'delete'
+  return <div className="fixed inset-0 z-[100] flex items-center justify-center bg-zinc-900/40 p-4 backdrop-blur-sm" onMouseDown={onCancel}>
+    <div onMouseDown={(e) => e.stopPropagation()} className="flex w-full max-w-[460px] flex-col overflow-hidden rounded-xl border border-[#c3c6d7] bg-white shadow-[0_4px_24px_rgba(0,0,0,0.08)]">
+      <div className="border-b border-[#c3c6d7]/30 p-6 pb-4">
+        <h3 className="mb-2 text-2xl font-semibold leading-[1.3] tracking-[-0.01em] text-[#191b23]">{copy.title}</h3>
+        <p className="text-sm leading-[1.6] text-[#434655]">{copy.detail}</p>
+      </div>
+      <div className="flex justify-end gap-3 border-t border-[#c3c6d7]/30 bg-[#faf8ff] p-6 pt-4">
+        <button type="button" onClick={onCancel} className="rounded-lg border border-[#c3c6d7] bg-white px-6 py-2 text-sm font-medium leading-none text-[#191b23] transition-colors hover:bg-[#f3f3fe]">取消</button>
+        <button type="button" onClick={onConfirm} className={`rounded-lg px-6 py-2 text-sm font-medium leading-none text-white transition-colors ${isDelete ? 'bg-[#ba1a1a] hover:bg-[#93000a]' : 'bg-[#191b23] hover:bg-[#191b23]/90'}`}>{copy.confirmText}</button>
+      </div>
+    </div>
+  </div>
+}
+
 function InlineNotice({ type, children }: { type: 'success' | 'error'; children: ReactNode }) {
   const tone = type === 'success' ? 'text-[#5f5e61]' : type === 'error' ? 'text-red-700' : 'text-[#5f5e61]'
   const icon = type === 'error' ? '!' : '✓'
@@ -346,8 +395,8 @@ function UpdatesTab({ setGlobalMessage }: { setGlobalMessage: (msg: string) => v
   return <div className="grid gap-6 lg:grid-cols-[1fr_320px]"><div className="space-y-4">{row('后端二进制', info?.backend, 'backend')}{row('前端静态资源', info?.frontend, 'frontend')}</div><aside className="rounded-xl border border-[#c3c6d7] bg-white p-6"><div className="font-semibold">Release 控制台</div><p className="mt-2 text-sm leading-6 text-[#434655]">检查 GitHub Release 中的前后端独立版本，并按需更新。</p><div className="mt-5 grid gap-2"><button disabled={busy} onClick={check} className={quietButton}>检查更新</button><button disabled={busy} onClick={restart} className="h-[36px] rounded bg-red-600 px-4 text-sm font-medium text-white disabled:bg-zinc-300">重启后端</button></div>{message && <div className="mt-4 rounded-lg bg-[#f3f3fe] px-3 py-2 text-sm text-[#434655]">{message}</div>}</aside></div>
 }
 
-function StorageTab({ buckets, editingBucket, setEditingBucket, saveBucket, deleteBucket }: { buckets: Bucket[]; editingBucket: Bucket | null; setEditingBucket: (bucket: Bucket | null) => void; saveBucket: (e: React.FormEvent<HTMLFormElement>) => Promise<void>; deleteBucket: (bucket: Bucket) => Promise<void> }) {
-  const formKey = editingBucket?.id ?? 'new-bucket'
+function StorageTab({ buckets, editingBucket, setEditingBucket, formVersion, saveBucket, deleteBucket }: { buckets: Bucket[]; editingBucket: Bucket | null; setEditingBucket: (bucket: Bucket | null) => void; formVersion: number; saveBucket: (e: React.FormEvent<HTMLFormElement>) => Promise<void>; deleteBucket: (bucket: Bucket) => Promise<void> }) {
+  const formKey = `${editingBucket?.id ?? 'new-bucket'}-${formVersion}`
   const defaults = bucketEditDefaults(editingBucket)
-  return <div className="grid gap-6 lg:grid-cols-[420px_minmax(0,1fr)]"><form key={formKey} onSubmit={saveBucket} className="rounded-xl border border-[#c3c6d7] bg-white p-6"><div className="flex items-center justify-between gap-3"><h3 className="text-lg font-semibold">{editingBucket ? '编辑 COS 存储桶' : '连接 COS 存储桶'}</h3>{editingBucket && <button type="button" onClick={() => setEditingBucket(null)} className="text-xs font-medium text-[#434655] hover:text-[#191b23]">取消编辑</button>}</div><p className="mt-2 text-sm leading-6 text-[#434655]">配置后可为用户启用存储桶模式，降低直传带宽压力。</p><div className="mt-5 grid gap-3"><input name="name" defaultValue={defaults.name} placeholder="名称" className={inputClass} /><input name="region" defaultValue={defaults.region} placeholder="地域 Region，例如 ap-nanjing" className={inputClass} /><input name="bucket" defaultValue={defaults.bucket} placeholder="Bucket，例如 gptimage-1325670071" className={inputClass} /><input name="secretId" defaultValue={defaults.secretId} placeholder="SecretId" className={inputClass} /><input name="secretKey" defaultValue={defaults.secretKey} placeholder="SecretKey" type="password" className={inputClass} /><input name="pathPrefix" defaultValue={defaults.pathPrefix} placeholder="路径前缀 images" className={inputClass} /><input name="tempUrlMinutes" defaultValue={defaults.tempUrlMinutes} placeholder="临时链接分钟数，可填 60*24" inputMode="decimal" onBlur={(e) => normalizeMinuteInput(e.currentTarget)} onKeyDown={(e) => { if (e.key === 'Enter') normalizeMinuteInput(e.currentTarget) }} className={inputClass} /><button className={`${primaryButton} mt-2`}>{editingBucket ? '保存修改' : '添加存储桶'}</button></div></form><section className="rounded-xl border border-[#c3c6d7] bg-white p-6"><div className="flex items-center justify-between"><h3 className="text-lg font-semibold">存储资产</h3><span className="text-xs text-[#434655]">{buckets.length} 个桶</span></div><div className="mt-5 grid gap-3 md:grid-cols-2">{buckets.length === 0 && <div className="rounded-lg bg-[#faf8ff] p-4 text-sm text-[#434655]">暂无存储桶</div>}{buckets.map((b) => <div key={b.id} className={`rounded-lg border p-4 ${editingBucket?.id === b.id ? 'border-[#191b23] bg-white' : 'border-[#c3c6d7] bg-[#faf8ff]'}`}><div className="flex items-center justify-between gap-3"><div className="font-medium">{b.name}</div><div className="rounded-full bg-[#ededf9] px-2 py-1 text-xs text-[#434655]">{b.imageCount} 张</div></div><div className="mt-3 break-all font-mono text-xs leading-5 text-[#434655]">{b.bucket} · {b.region}</div><div className="mt-3 text-xs text-[#434655]">前缀 {b.pathPrefix || '-'} · 临时链接 {b.tempUrlMinutes} 分钟</div><div className="mt-4 flex items-center gap-4"><button type="button" onClick={() => setEditingBucket(b)} className="text-xs font-semibold text-[#004ac6] hover:opacity-80">编辑</button><button type="button" onClick={() => { if (window.confirm(`确定删除存储桶“${b.name}”？`)) void deleteBucket(b) }} className="text-xs font-semibold text-[#ba1a1a] hover:opacity-80">删除</button></div></div>)}</div></section></div>
+  return <div className="grid gap-6 lg:grid-cols-[420px_minmax(0,1fr)]"><form key={formKey} onSubmit={saveBucket} className="rounded-xl border border-[#c3c6d7] bg-white p-6"><div className="flex items-center justify-between gap-3"><h3 className="text-lg font-semibold">{editingBucket ? '编辑 COS 存储桶' : '连接 COS 存储桶'}</h3>{editingBucket && <button type="button" onClick={() => setEditingBucket(null)} className="text-xs font-medium text-[#434655] hover:text-[#191b23]">取消编辑</button>}</div><p className="mt-2 text-sm leading-6 text-[#434655]">配置后可为用户启用存储桶模式，降低直传带宽压力。</p><div className="mt-5 grid gap-3"><input name="name" defaultValue={defaults.name} placeholder="名称" className={inputClass} /><input name="region" defaultValue={defaults.region} placeholder="地域 Region，例如 ap-nanjing" className={inputClass} /><input name="bucket" defaultValue={defaults.bucket} placeholder="Bucket，例如 gptimage-1325670071" className={inputClass} /><input name="secretId" defaultValue={defaults.secretId} placeholder="SecretId" className={inputClass} /><input name="secretKey" defaultValue={defaults.secretKey} placeholder="SecretKey" type="password" className={inputClass} /><input name="pathPrefix" defaultValue={defaults.pathPrefix} placeholder="路径前缀 images" className={inputClass} /><input name="tempUrlMinutes" defaultValue={defaults.tempUrlMinutes} placeholder="临时链接分钟数，可填 60*24" inputMode="decimal" onBlur={(e) => normalizeMinuteInput(e.currentTarget)} onKeyDown={(e) => { if (e.key === 'Enter') normalizeMinuteInput(e.currentTarget) }} className={inputClass} /><button className={`${primaryButton} mt-2`}>{editingBucket ? '保存修改' : '添加存储桶'}</button></div></form><section className="rounded-xl border border-[#c3c6d7] bg-white p-6"><div className="flex items-center justify-between"><h3 className="text-lg font-semibold">存储资产</h3><span className="text-xs text-[#434655]">{buckets.length} 个桶</span></div><div className="mt-5 grid gap-3 md:grid-cols-2">{buckets.length === 0 && <div className="rounded-lg bg-[#faf8ff] p-4 text-sm text-[#434655]">暂无存储桶</div>}{buckets.map((b) => <div key={b.id} className={`rounded-lg border p-4 ${editingBucket?.id === b.id ? 'border-[#191b23] bg-white' : 'border-[#c3c6d7] bg-[#faf8ff]'}`}><div className="flex items-center justify-between gap-3"><div className="font-medium">{b.name}</div><div className="rounded-full bg-[#ededf9] px-2 py-1 text-xs text-[#434655]">{b.imageCount} 张</div></div><div className="mt-3 break-all font-mono text-xs leading-5 text-[#434655]">{b.bucket} · {b.region}</div><div className="mt-3 text-xs text-[#434655]">前缀 {b.pathPrefix || '-'} · 临时链接 {b.tempUrlMinutes} 分钟</div><div className="mt-4 flex items-center gap-4"><button type="button" onClick={() => setEditingBucket(b)} className="text-xs font-semibold text-[#004ac6] hover:opacity-80">编辑</button><button type="button" onClick={() => void deleteBucket(b)} className="text-xs font-semibold text-[#ba1a1a] hover:opacity-80">删除</button></div></div>)}</div></section></div>
 }

@@ -10,6 +10,8 @@ export type EditableBucket = {
   tempUrlMinutes?: number
 }
 
+export type BucketConfirmAction = 'add' | 'delete'
+
 export function evaluateMinuteExpression(value: string) {
   const source = value.trim()
   if (!source) return 0
@@ -54,4 +56,24 @@ export function bucketEditDefaults(bucket: EditableBucket | null) {
     pathPrefix: bucket?.pathPrefix ?? '',
     tempUrlMinutes: bucket?.tempUrlMinutes ? String(bucket.tempUrlMinutes) : '',
   }
+}
+
+export function bucketConfirmCopy(action: BucketConfirmAction, bucketName: string) {
+  const name = bucketName.trim() || '未命名存储桶'
+  if (action === 'add') {
+    return {
+      title: '确认添加存储桶',
+      detail: `即将添加存储桶“${name}”，添加后启用存储桶模式的用户可使用该配置保存图片。`,
+      confirmText: '确认添加',
+    }
+  }
+  return {
+    title: '确认删除存储桶',
+    detail: `确定删除存储桶“${name}”？删除后不会删除 COS 中已有文件，但用户将不能继续使用该配置保存新图片。`,
+    confirmText: '确认删除',
+  }
+}
+
+export function toastTypeForError(error: unknown): 'success' | 'error' {
+  return error ? 'error' : 'success'
 }

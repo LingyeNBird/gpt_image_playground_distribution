@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { bucketEditDefaults, bucketPayloadFromFields, evaluateMinuteExpression } from './bucketForm'
+import { bucketConfirmCopy, bucketEditDefaults, bucketPayloadFromFields, evaluateMinuteExpression, toastTypeForError } from './bucketForm'
 
 describe('bucket form helpers', () => {
   it('evaluates temporary URL minute expressions', () => {
@@ -51,5 +51,16 @@ describe('bucket form helpers', () => {
       pathPrefix: 'image_playground',
       tempUrlMinutes: '1440',
     })
+  })
+
+  it('builds add and delete confirmation copy', () => {
+    expect(bucketConfirmCopy('add', ' 我的腾讯云 ').title).toBe('确认添加存储桶')
+    expect(bucketConfirmCopy('add', ' 我的腾讯云 ').detail).toContain('我的腾讯云')
+    expect(bucketConfirmCopy('delete', '旧桶').confirmText).toBe('确认删除')
+  })
+
+  it('classifies toast tone from operation result', () => {
+    expect(toastTypeForError(null)).toBe('success')
+    expect(toastTypeForError(new Error('失败'))).toBe('error')
   })
 })
