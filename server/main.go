@@ -677,7 +677,15 @@ func (s *Server) handleAdminUserByID(w http.ResponseWriter, r *http.Request, ses
 			u.AllowBucket = *req.AllowBucket
 			changes = append(changes, fmt.Sprintf("存储桶模式：%s", displayBool(*req.AllowBucket)))
 		}
-		if !u.AllowDirect && !u.AllowBucket {
+		if !u.Banned && !u.AllowDirect && !u.AllowBucket {
+			if req.Banned != nil && !*req.Banned {
+				u.AllowDirect = true
+				changes = append(changes, "直传模式：开启")
+			} else {
+				return errors.New("至少开启一种分发模式")
+			}
+		}
+		if !u.Banned && !u.AllowDirect && !u.AllowBucket {
 			return errors.New("至少开启一种分发模式")
 		}
 		if len(changes) > 0 {
