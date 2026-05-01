@@ -52,6 +52,7 @@ type Server struct {
 	store     *Store
 	sessions  *SessionStore
 	adminKey  string
+	cookieKey []byte
 }
 
 type Store struct {
@@ -66,6 +67,7 @@ type AppState struct {
 	Buckets     map[string]*BucketConfig   `json:"buckets"`
 	Tasks       map[string]*GenerationTask `json:"tasks"`
 	FailureLogs []FailureLog               `json:"failureLogs"`
+	AuditLogs   []AuditLog                 `json:"auditLogs"`
 }
 
 type User struct {
@@ -136,6 +138,16 @@ type FailureLog struct {
 	CreatedAt int64  `json:"createdAt"`
 }
 
+type AuditLog struct {
+	ID        string `json:"id"`
+	Type      string `json:"type"`
+	Title     string `json:"title"`
+	Detail    string `json:"detail"`
+	UserID    string `json:"userId,omitempty"`
+	Username  string `json:"username,omitempty"`
+	CreatedAt int64  `json:"createdAt"`
+}
+
 type Session struct {
 	ID         string
 	UserID     string
@@ -180,7 +192,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	s := &Server{dataDir: dataDir, staticDir: staticDir, store: store, sessions: &SessionStore{items: map[string]*Session{}}, adminKey: adminKey}
+	s := &Server{dataDir: dataDir, staticDir: staticDir, store: store, sessions: &SessionStore{items: map[string]*Session{}}, adminKey: adminKey, cookieKey: deriveCookieKey(dataDir)}
 	mux := http.NewServeMux()
 	s.routes(mux)
 	log.Printf("gpt-image-playground listening on %s", addr)
@@ -201,6 +213,7 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/admin/users/", s.requireAdmin(s.handleAdminUserByID))
 	mux.HandleFunc("/api/admin/buckets", s.requireAdmin(s.handleAdminBuckets))
 	mux.HandleFunc("/api/admin/failures", s.requireAdmin(s.handleAdminFailures))
+	mux.HandleFunc("/api/admin/audit", s.requireAdmin(s.handleAdminAudit))
 	mux.HandleFunc("/api/admin/update/check", s.requireAdmin(s.handleUpdateCheck))
 	mux.HandleFunc("/api/admin/update/backend", s.requireAdmin(s.handleUpdateBackend))
 	mux.HandleFunc("/api/admin/update/frontend", s.requireAdmin(s.handleUpdateFrontend))
@@ -251,6 +264,12 @@ func (st *Store) load() error {
 	if st.state.Tasks == nil {
 		st.state.Tasks = map[string]*GenerationTask{}
 	}
+	if st.state.FailureLogs == nil {
+		st.state.FailureLogs = []FailureLog{}
+	}
+	if st.state.AuditLogs == nil {
+		st.state.AuditLogs = []AuditLog{}
+	}
 	if st.state.Settings.Timeout == 0 {
 		st.state.Settings.Timeout = 300
 	}
@@ -286,6 +305,13 @@ func (st *Store) with(fn func(*AppState) error) error {
 		return err
 	}
 	return st.saveLocked()
+}
+
+func appendAudit(st *AppState, typ, title, detail, userID, username string) {
+	st.AuditLogs = append([]AuditLog{{ID: randomHex(12), Type: typ, Title: title, Detail: detail, UserID: userID, Username: username, CreatedAt: nowMs()}}, st.AuditLogs...)
+	if len(st.AuditLogs) > 500 {
+		st.AuditLogs = st.AuditLogs[:500]
+	}
 }
 
 func (st *Store) snapshot() AppState {
@@ -357,6 +383,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		}
 		user = &User{ID: randomHex(12), Username: req.Username, PasswordHash: hashPassword(req.Password), QuotaTotal: 0, AllowDirect: true, AllowBucket: false, CreatedAt: nowMs(), LastSeenAt: nowMs()}
 		st.Users[user.ID] = user
+		appendAudit(st, "user_register", "用户注册", fmt.Sprintf("%s 注册了新账号。", user.Username), user.ID, user.Username)
 		return nil
 	})
 	if err != nil {
@@ -364,7 +391,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sess := s.sessions.create(user.ID, user.Username, "user")
-	setSessionCookie(w, sess.ID)
+	s.setSessionCookie(w, sess)
 	writeJSON(w, map[string]any{"user": s.publicCurrentUser(user, "user")})
 }
 
@@ -384,7 +411,11 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		sess := s.sessions.create("admin", "管理员", "admin")
-		setSessionCookie(w, sess.ID)
+		s.setSessionCookie(w, sess)
+		_ = s.store.with(func(st *AppState) error {
+			appendAudit(st, "admin_login", "管理员登录", "管理员已成功登录。", "admin", "管理员")
+			return nil
+		})
 		writeJSON(w, map[string]any{"user": map[string]any{"id": "admin", "username": "管理员", "role": "admin"}})
 		return
 	}
@@ -408,10 +439,11 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		if u := st.Users[user.ID]; u != nil {
 			u.LastSeenAt = nowMs()
 		}
+		appendAudit(st, "user_login", "用户登录", fmt.Sprintf("%s 已成功登录。", user.Username), user.ID, user.Username)
 		return nil
 	})
 	sess := s.sessions.create(user.ID, user.Username, "user")
-	setSessionCookie(w, sess.ID)
+	s.setSessionCookie(w, sess)
 	writeJSON(w, map[string]any{"user": s.publicCurrentUser(user, "user")})
 }
 
@@ -462,34 +494,42 @@ func (s *Server) handleGenerate(w http.ResponseWriter, r *http.Request, sess *Se
 		return
 	}
 	state := s.store.snapshot()
-	user := state.Users[sess.UserID]
-	if user == nil || user.Disabled || user.Banned {
-		httpError(w, 403, "账号不可用")
-		return
-	}
 	mode := req.Mode
 	if mode != "bucket" {
 		mode = "direct"
 	}
-	if mode == "direct" && !user.AllowDirect {
-		httpError(w, 403, "未开启直传模式")
-		return
-	}
-	if mode == "bucket" && !user.AllowBucket {
-		httpError(w, 403, "未开启存储桶模式")
-		return
-	}
-	if user.QuotaTotal <= user.QuotaUsed {
-		httpError(w, 403, "生图额度不足")
-		return
+	username := sess.Username
+	if sess.Role != "admin" {
+		user := state.Users[sess.UserID]
+		if user == nil || user.Disabled || user.Banned {
+			httpError(w, 403, "账号不可用")
+			return
+		}
+		username = user.Username
+		if mode == "direct" && !user.AllowDirect {
+			httpError(w, 403, "未开启直传模式")
+			return
+		}
+		if mode == "bucket" && !user.AllowBucket {
+			httpError(w, 403, "未开启存储桶模式")
+			return
+		}
+		if user.QuotaTotal <= user.QuotaUsed {
+			httpError(w, 403, "生图额度不足")
+			return
+		}
 	}
 	settings := state.Settings
 	if settings.APIKey == "" {
 		httpError(w, 500, "管理员尚未配置上游 API Key")
 		return
 	}
-	task := &GenerationTask{ID: randomHex(12), UserID: user.ID, Username: user.Username, Prompt: strings.TrimSpace(req.Prompt), Params: req.Params, Mode: mode, Status: "running", CreatedAt: nowMs()}
-	if err := s.store.with(func(st *AppState) error { st.Tasks[task.ID] = task; return nil }); err != nil {
+	task := &GenerationTask{ID: randomHex(12), UserID: sess.UserID, Username: username, Prompt: strings.TrimSpace(req.Prompt), Params: req.Params, Mode: mode, Status: "running", CreatedAt: nowMs()}
+	if err := s.store.with(func(st *AppState) error {
+		st.Tasks[task.ID] = task
+		appendAudit(st, "generation_start", "生图任务已提交", fmt.Sprintf("%s 提交了%s模式生图任务。", task.Username, displayMode(task.Mode)), task.UserID, task.Username)
+		return nil
+	}); err != nil {
 		httpError(w, 500, err.Error())
 		return
 	}
@@ -567,6 +607,12 @@ func (s *Server) handleAdminUsers(w http.ResponseWriter, r *http.Request, sess *
 		if !decodeJSON(w, r, &req) {
 			return
 		}
+		req.Username = strings.TrimSpace(req.Username)
+		if req.Username == "" || req.Password == "" {
+			httpError(w, 400, "请填写用户名和密码")
+			return
+		}
+		createdID := ""
 		err := s.store.with(func(st *AppState) error {
 			for _, u := range st.Users {
 				if strings.EqualFold(u.Username, req.Username) {
@@ -575,13 +621,16 @@ func (s *Server) handleAdminUsers(w http.ResponseWriter, r *http.Request, sess *
 			}
 			id := randomHex(12)
 			st.Users[id] = &User{ID: id, Username: req.Username, PasswordHash: hashPassword(req.Password), QuotaTotal: req.QuotaTotal, AllowDirect: true, CreatedAt: nowMs(), LastSeenAt: nowMs()}
+			createdID = id
+			appendAudit(st, "user_create", "用户已创建", fmt.Sprintf("管理员创建了用户 %s。", req.Username), id, req.Username)
 			return nil
 		})
 		if err != nil {
 			httpError(w, 400, err.Error())
 			return
 		}
-		writeJSON(w, map[string]bool{"ok": true})
+		user, _ := s.adminUser(createdID)
+		writeJSON(w, map[string]any{"ok": true, "user": user})
 	default:
 		methodNotAllowed(w)
 	}
@@ -606,23 +655,33 @@ func (s *Server) handleAdminUserByID(w http.ResponseWriter, r *http.Request, ses
 		if u == nil {
 			return errors.New("用户不存在")
 		}
+		changes := []string{}
 		if req.Disabled != nil {
 			u.Disabled = *req.Disabled
+			changes = append(changes, fmt.Sprintf("禁用状态：%s", displayBool(*req.Disabled)))
 		}
 		if req.Banned != nil {
 			u.Banned = *req.Banned
+			u.Disabled = false
+			changes = append(changes, fmt.Sprintf("封禁状态：%s", displayBool(*req.Banned)))
 		}
 		if req.QuotaTotal != nil {
 			u.QuotaTotal = *req.QuotaTotal
+			changes = append(changes, fmt.Sprintf("总额度：%d", *req.QuotaTotal))
 		}
 		if req.AllowDirect != nil {
 			u.AllowDirect = *req.AllowDirect
+			changes = append(changes, fmt.Sprintf("直传模式：%s", displayBool(*req.AllowDirect)))
 		}
 		if req.AllowBucket != nil {
 			u.AllowBucket = *req.AllowBucket
+			changes = append(changes, fmt.Sprintf("存储桶模式：%s", displayBool(*req.AllowBucket)))
 		}
 		if !u.AllowDirect && !u.AllowBucket {
 			return errors.New("至少开启一种分发模式")
+		}
+		if len(changes) > 0 {
+			appendAudit(st, "user_update", "用户已更新", fmt.Sprintf("管理员更新了 %s：%s。", u.Username, strings.Join(changes, "，")), u.ID, u.Username)
 		}
 		return nil
 	})
@@ -630,7 +689,12 @@ func (s *Server) handleAdminUserByID(w http.ResponseWriter, r *http.Request, ses
 		httpError(w, 400, err.Error())
 		return
 	}
-	writeJSON(w, map[string]bool{"ok": true})
+	user, ok := s.adminUser(id)
+	if !ok {
+		httpError(w, 404, "用户不存在")
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true, "user": user})
 }
 
 func (s *Server) handleAdminBuckets(w http.ResponseWriter, r *http.Request, sess *Session) {
@@ -661,6 +725,7 @@ func (s *Server) handleAdminBuckets(w http.ResponseWriter, r *http.Request, sess
 				req.Name = req.BucketURL
 			}
 			st.Buckets[req.ID] = &req
+			appendAudit(st, "bucket_create", "存储桶已添加", fmt.Sprintf("管理员连接了存储桶“%s”。", req.Name), "admin", "管理员")
 			return nil
 		})
 		if err != nil {
@@ -675,7 +740,20 @@ func (s *Server) handleAdminBuckets(w http.ResponseWriter, r *http.Request, sess
 
 func (s *Server) handleAdminFailures(w http.ResponseWriter, r *http.Request, sess *Session) {
 	state := s.store.snapshot()
-	writeJSON(w, map[string]any{"failures": state.FailureLogs})
+	failures := state.FailureLogs
+	if failures == nil {
+		failures = []FailureLog{}
+	}
+	writeJSON(w, map[string]any{"failures": failures})
+}
+
+func (s *Server) handleAdminAudit(w http.ResponseWriter, r *http.Request, sess *Session) {
+	state := s.store.snapshot()
+	audit := state.AuditLogs
+	if audit == nil {
+		audit = []AuditLog{}
+	}
+	writeJSON(w, map[string]any{"audit": audit})
 }
 
 func (s *Server) executeGeneration(taskID string, settings AdminSettings, inputImages []string, maskDataURL string) {
@@ -1002,6 +1080,54 @@ func decryptString(master, enc string) (string, error) {
 	return string(plain), nil
 }
 
+func deriveCookieKey(dataDir string) []byte {
+	b, err := os.ReadFile(filepath.Join(dataDir, "server.key"))
+	if err != nil {
+		b = []byte("fallback-cookie-key")
+	}
+	sum := sha256.Sum256(bytes.TrimSpace(b))
+	return sum[:]
+}
+
+func (s *Server) signSession(sess *Session) string {
+	payload := fmt.Sprintf("%s|%s|%s|%d", sess.UserID, sess.Username, sess.Role, time.Now().Add(30*24*time.Hour).Unix())
+	mac := hmac.New(sha256.New, s.cookieKey)
+	_, _ = mac.Write([]byte(payload))
+	sig := hex.EncodeToString(mac.Sum(nil))
+	return base64.RawURLEncoding.EncodeToString([]byte(payload + "|" + sig))
+}
+
+func (s *Server) verifySignedSession(value string) (*Session, bool) {
+	raw, err := base64.RawURLEncoding.DecodeString(value)
+	if err != nil {
+		return nil, false
+	}
+	parts := strings.Split(string(raw), "|")
+	if len(parts) != 5 {
+		return nil, false
+	}
+	payload := strings.Join(parts[:4], "|")
+	mac := hmac.New(sha256.New, s.cookieKey)
+	_, _ = mac.Write([]byte(payload))
+	expected := hex.EncodeToString(mac.Sum(nil))
+	if !hmac.Equal([]byte(expected), []byte(parts[4])) {
+		return nil, false
+	}
+	var exp int64
+	if _, err := fmt.Sscanf(parts[3], "%d", &exp); err != nil || exp < time.Now().Unix() {
+		return nil, false
+	}
+	if parts[2] != "admin" {
+		state := s.store.snapshot()
+		u := state.Users[parts[0]]
+		if u == nil || u.Disabled || u.Banned {
+			return nil, false
+		}
+	}
+	sess := s.sessions.create(parts[0], parts[1], parts[2])
+	return sess, true
+}
+
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	_ = json.NewEncoder(w).Encode(v)
@@ -1026,8 +1152,9 @@ func methodNotAllowed(w http.ResponseWriter) {
 	httpError(w, http.StatusMethodNotAllowed, "method not allowed")
 }
 
-func setSessionCookie(w http.ResponseWriter, sid string) {
-	http.SetCookie(w, &http.Cookie{Name: cookieName, Value: sid, Path: "/", MaxAge: 86400 * 30, HttpOnly: true, SameSite: http.SameSiteLaxMode})
+func (s *Server) setSessionCookie(w http.ResponseWriter, sess *Session) {
+	value := s.signSession(sess)
+	http.SetCookie(w, &http.Cookie{Name: cookieName, Value: value, Path: "/", MaxAge: 86400 * 30, HttpOnly: true, SameSite: http.SameSiteLaxMode})
 }
 
 func (s *Server) sessionFromRequest(r *http.Request) (*Session, bool) {
@@ -1035,7 +1162,10 @@ func (s *Server) sessionFromRequest(r *http.Request) (*Session, bool) {
 	if err != nil || c.Value == "" {
 		return nil, false
 	}
-	return s.sessions.get(c.Value)
+	if sess, ok := s.sessions.get(c.Value); ok {
+		return sess, true
+	}
+	return s.verifySignedSession(c.Value)
 }
 
 func (s *Server) requireUser(next func(http.ResponseWriter, *http.Request, *Session)) http.HandlerFunc {
@@ -1043,10 +1173,6 @@ func (s *Server) requireUser(next func(http.ResponseWriter, *http.Request, *Sess
 		sess, ok := s.sessionFromRequest(r)
 		if !ok {
 			httpError(w, 401, "请先登录")
-			return
-		}
-		if sess.Role == "admin" {
-			httpError(w, 403, "管理员不能执行用户生成任务")
 			return
 		}
 		next(w, r, sess)
@@ -1085,6 +1211,22 @@ func (s *Server) adminUsers() []publicUser {
 	return users
 }
 
+func (s *Server) adminUser(id string) (publicUser, bool) {
+	state := s.store.snapshot()
+	u := state.Users[id]
+	if u == nil {
+		return publicUser{}, false
+	}
+	online := s.sessions.onlineUserIDs()
+	runningTasks := 0
+	for _, t := range state.Tasks {
+		if t.UserID == id && t.Status == "running" {
+			runningTasks++
+		}
+	}
+	return publicUser{ID: u.ID, Username: u.Username, Disabled: u.Disabled, Banned: u.Banned, QuotaTotal: u.QuotaTotal, QuotaUsed: u.QuotaUsed, QuotaRemaining: max(0, u.QuotaTotal-u.QuotaUsed), AllowDirect: u.AllowDirect, AllowBucket: u.AllowBucket, CreatedAt: u.CreatedAt, LastSeenAt: u.LastSeenAt, Online: online[u.ID], RunningTasks: runningTasks}, true
+}
+
 func sanitizeTaskForUser(t *GenerationTask) *GenerationTask {
 	cp := *t
 	if cp.Status == "error" {
@@ -1114,6 +1256,21 @@ func max(a, b int) int {
 	}
 	return b
 }
+
+func displayMode(mode string) string {
+	if mode == "bucket" {
+		return "存储桶"
+	}
+	return "直传"
+}
+
+func displayBool(v bool) string {
+	if v {
+		return "开启"
+	}
+	return "关闭"
+}
+
 func toInt(v any) int {
 	switch n := v.(type) {
 	case float64:
@@ -1243,14 +1400,34 @@ func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	path := filepath.Clean(strings.TrimPrefix(r.URL.Path, "/"))
+	servedPath := path
 	if path == "." {
 		path = "index.html"
+		servedPath = path
 	}
 	full := filepath.Join(s.staticDir, path)
 	if st, err := os.Stat(full); err != nil || st.IsDir() {
 		full = filepath.Join(s.staticDir, "index.html")
+		servedPath = "index.html"
 	}
+	setStaticCacheHeaders(w, servedPath)
 	http.ServeFile(w, r, full)
+}
+
+func setStaticCacheHeaders(w http.ResponseWriter, path string) {
+	name := strings.ToLower(filepath.Base(path))
+	ext := strings.ToLower(filepath.Ext(path))
+	if name == "index.html" || name == "sw.js" || name == "manifest.webmanifest" || ext == ".html" {
+		w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+		w.Header().Set("Pragma", "no-cache")
+		w.Header().Set("Expires", "0")
+		return
+	}
+	if strings.HasPrefix(strings.TrimPrefix(path, string(filepath.Separator)), "assets") {
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		return
+	}
+	w.Header().Set("Cache-Control", "no-cache")
 }
 
 type releaseInfo struct {
