@@ -1,5 +1,15 @@
 export type BucketFormFields = Record<string, FormDataEntryValue>
 
+export type EditableBucket = {
+  name?: string
+  region?: string
+  bucket?: string
+  secretId?: string
+  secretKey?: string
+  pathPrefix?: string
+  tempUrlMinutes?: number
+}
+
 export function evaluateMinuteExpression(value: string) {
   const source = value.trim()
   if (!source) return 0
@@ -31,5 +41,17 @@ export function bucketPayloadFromFields(fields: BucketFormFields) {
     secretKey: String(fields.secretKey || ''),
     pathPrefix: String(fields.pathPrefix || '').trim(),
     tempUrlMinutes,
+  }
+}
+
+export function bucketEditDefaults(bucket: EditableBucket | null) {
+  return {
+    name: bucket?.name ?? '',
+    region: bucket?.region ?? '',
+    bucket: bucket?.bucket ?? '',
+    secretId: bucket?.secretId ?? '',
+    secretKey: bucket?.secretKey ?? '',
+    pathPrefix: bucket?.pathPrefix ?? '',
+    tempUrlMinutes: bucket?.tempUrlMinutes ? String(bucket.tempUrlMinutes) : '',
   }
 }

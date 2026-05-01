@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { bucketPayloadFromFields, evaluateMinuteExpression } from './bucketForm'
+import { bucketEditDefaults, bucketPayloadFromFields, evaluateMinuteExpression } from './bucketForm'
 
 describe('bucket form helpers', () => {
   it('evaluates temporary URL minute expressions', () => {
@@ -31,5 +31,25 @@ describe('bucket form helpers', () => {
 
   it('rejects invalid minute expressions', () => {
     expect(() => bucketPayloadFromFields({ tempUrlMinutes: '1 day' })).toThrow('临时链接分钟数表达式不正确')
+  })
+
+  it('keeps credentials when filling edit defaults', () => {
+    expect(bucketEditDefaults({
+      name: '我的腾讯云',
+      region: 'ap-nanjing',
+      bucket: 'gptimage-1325670071',
+      secretId: 'sid',
+      secretKey: 'skey',
+      pathPrefix: 'image_playground',
+      tempUrlMinutes: 1440,
+    })).toEqual({
+      name: '我的腾讯云',
+      region: 'ap-nanjing',
+      bucket: 'gptimage-1325670071',
+      secretId: 'sid',
+      secretKey: 'skey',
+      pathPrefix: 'image_playground',
+      tempUrlMinutes: '1440',
+    })
   })
 })

@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
 import { apiRequest } from '../lib/backend'
-import { bucketPayloadFromFields, normalizeMinuteInput } from './bucketForm'
+import { bucketEditDefaults, bucketPayloadFromFields, normalizeMinuteInput } from './bucketForm'
 
 type AdminUser = { id: string; username: string; disabled: boolean; banned: boolean; quotaTotal: number; quotaUsed: number; quotaRemaining: number; allowDirect: boolean; allowBucket: boolean; online: boolean; runningTasks: number }
-type Bucket = { id: string; name: string; region: string; bucket: string; pathPrefix: string; tempUrlMinutes: number; imageCount: number }
+type Bucket = { id: string; name: string; region: string; bucket: string; secretId: string; secretKey: string; pathPrefix: string; tempUrlMinutes: number; imageCount: number }
 type Failure = { id: string; username: string; prompt: string; error: string; createdAt: number }
 type AuditEntry = { id: string; type: string; title: string; detail: string; userId?: string; username?: string; createdAt: number }
 type AuditPage = { audit: AuditEntry[]; total: number; offset: number; limit: number; hasMore: boolean }
@@ -125,6 +125,18 @@ export default function AdminPanel() {
     }
   }
 
+  const deleteBucket = async (bucket: Bucket) => {
+    setMessage('')
+    try {
+      await apiRequest(`/api/admin/buckets/${bucket.id}`, { method: 'DELETE' })
+      if (editingBucket?.id === bucket.id) setEditingBucket(null)
+      setMessage('存储桶已删除')
+      await load()
+    } catch (err) {
+      setMessage(`删除存储桶失败：${err instanceof Error ? err.message : String(err)}`)
+    }
+  }
+
   return (
     <div className="min-h-screen bg-[#f3f3fe] text-[#191b23]" style={{ fontFamily: 'Manrope, var(--font-ui-sans)' }}>
       <main className="mx-auto max-w-[1440px] px-8 py-10 pb-48">
@@ -151,7 +163,7 @@ export default function AdminPanel() {
       {message && <div className="mb-4 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700 dark:border-emerald-500/20 dark:bg-emerald-500/10 dark:text-emerald-300">{message}</div>}
 
         {tab === 'users' && <UsersTab users={users} audit={audit} failures={failures} usersLoading={usersLoading} usersError={usersError} auditLoading={auditLoading} auditHasMore={auditHasMore} patchUser={patchUser} reload={loadUsers} setUsers={setUsers} refreshAudit={refreshAudit} loadOlderAudit={() => loadAuditPage(audit.length)} />}
-      {tab === 'storage' && <StorageTab buckets={buckets} editingBucket={editingBucket} setEditingBucket={setEditingBucket} saveBucket={saveBucket} />}
+      {tab === 'storage' && <StorageTab buckets={buckets} editingBucket={editingBucket} setEditingBucket={setEditingBucket} saveBucket={saveBucket} deleteBucket={deleteBucket} />}
       {tab === 'updates' && <UpdatesTab setGlobalMessage={setMessage} />}
       </main>
     </div>
@@ -334,7 +346,8 @@ function UpdatesTab({ setGlobalMessage }: { setGlobalMessage: (msg: string) => v
   return <div className="grid gap-6 lg:grid-cols-[1fr_320px]"><div className="space-y-4">{row('后端二进制', info?.backend, 'backend')}{row('前端静态资源', info?.frontend, 'frontend')}</div><aside className="rounded-xl border border-[#c3c6d7] bg-white p-6"><div className="font-semibold">Release 控制台</div><p className="mt-2 text-sm leading-6 text-[#434655]">检查 GitHub Release 中的前后端独立版本，并按需更新。</p><div className="mt-5 grid gap-2"><button disabled={busy} onClick={check} className={quietButton}>检查更新</button><button disabled={busy} onClick={restart} className="h-[36px] rounded bg-red-600 px-4 text-sm font-medium text-white disabled:bg-zinc-300">重启后端</button></div>{message && <div className="mt-4 rounded-lg bg-[#f3f3fe] px-3 py-2 text-sm text-[#434655]">{message}</div>}</aside></div>
 }
 
-function StorageTab({ buckets, editingBucket, setEditingBucket, saveBucket }: { buckets: Bucket[]; editingBucket: Bucket | null; setEditingBucket: (bucket: Bucket | null) => void; saveBucket: (e: React.FormEvent<HTMLFormElement>) => Promise<void> }) {
+function StorageTab({ buckets, editingBucket, setEditingBucket, saveBucket, deleteBucket }: { buckets: Bucket[]; editingBucket: Bucket | null; setEditingBucket: (bucket: Bucket | null) => void; saveBucket: (e: React.FormEvent<HTMLFormElement>) => Promise<void>; deleteBucket: (bucket: Bucket) => Promise<void> }) {
   const formKey = editingBucket?.id ?? 'new-bucket'
-  return <div className="grid gap-6 lg:grid-cols-[420px_minmax(0,1fr)]"><form key={formKey} onSubmit={saveBucket} className="rounded-xl border border-[#c3c6d7] bg-white p-6"><div className="flex items-center justify-between gap-3"><h3 className="text-lg font-semibold">{editingBucket ? '编辑 COS 存储桶' : '连接 COS 存储桶'}</h3>{editingBucket && <button type="button" onClick={() => setEditingBucket(null)} className="text-xs font-medium text-[#434655] hover:text-[#191b23]">取消编辑</button>}</div><p className="mt-2 text-sm leading-6 text-[#434655]">配置后可为用户启用存储桶模式，降低直传带宽压力。</p><div className="mt-5 grid gap-3"><input name="name" defaultValue={editingBucket?.name ?? ''} placeholder="名称" className={inputClass} /><input name="region" defaultValue={editingBucket?.region ?? ''} placeholder="地域 Region，例如 ap-nanjing" className={inputClass} /><input name="bucket" defaultValue={editingBucket?.bucket ?? ''} placeholder="Bucket，例如 gptimage-1325670071" className={inputClass} /><input name="secretId" placeholder="SecretId" className={inputClass} /><input name="secretKey" placeholder="SecretKey" type="password" className={inputClass} /><input name="pathPrefix" defaultValue={editingBucket?.pathPrefix ?? ''} placeholder="路径前缀 images" className={inputClass} /><input name="tempUrlMinutes" defaultValue={editingBucket?.tempUrlMinutes ? String(editingBucket.tempUrlMinutes) : ''} placeholder="临时链接分钟数，可填 60*24" inputMode="decimal" onBlur={(e) => normalizeMinuteInput(e.currentTarget)} onKeyDown={(e) => { if (e.key === 'Enter') normalizeMinuteInput(e.currentTarget) }} className={inputClass} /><button className={`${primaryButton} mt-2`}>{editingBucket ? '保存修改' : '添加存储桶'}</button></div></form><section className="rounded-xl border border-[#c3c6d7] bg-white p-6"><div className="flex items-center justify-between"><h3 className="text-lg font-semibold">存储资产</h3><span className="text-xs text-[#434655]">{buckets.length} 个桶</span></div><div className="mt-5 grid gap-3 md:grid-cols-2">{buckets.length === 0 && <div className="rounded-lg bg-[#faf8ff] p-4 text-sm text-[#434655]">暂无存储桶</div>}{buckets.map((b) => <div key={b.id} className={`rounded-lg border p-4 ${editingBucket?.id === b.id ? 'border-[#191b23] bg-white' : 'border-[#c3c6d7] bg-[#faf8ff]'}`}><div className="flex items-center justify-between gap-3"><div className="font-medium">{b.name}</div><div className="rounded-full bg-[#ededf9] px-2 py-1 text-xs text-[#434655]">{b.imageCount} 张</div></div><div className="mt-3 break-all font-mono text-xs leading-5 text-[#434655]">{b.bucket} · {b.region}</div><div className="mt-3 text-xs text-[#434655]">前缀 {b.pathPrefix || '-'} · 临时链接 {b.tempUrlMinutes} 分钟</div><button type="button" onClick={() => setEditingBucket(b)} className="mt-4 text-xs font-semibold text-[#004ac6] hover:opacity-80">编辑</button></div>)}</div></section></div>
+  const defaults = bucketEditDefaults(editingBucket)
+  return <div className="grid gap-6 lg:grid-cols-[420px_minmax(0,1fr)]"><form key={formKey} onSubmit={saveBucket} className="rounded-xl border border-[#c3c6d7] bg-white p-6"><div className="flex items-center justify-between gap-3"><h3 className="text-lg font-semibold">{editingBucket ? '编辑 COS 存储桶' : '连接 COS 存储桶'}</h3>{editingBucket && <button type="button" onClick={() => setEditingBucket(null)} className="text-xs font-medium text-[#434655] hover:text-[#191b23]">取消编辑</button>}</div><p className="mt-2 text-sm leading-6 text-[#434655]">配置后可为用户启用存储桶模式，降低直传带宽压力。</p><div className="mt-5 grid gap-3"><input name="name" defaultValue={defaults.name} placeholder="名称" className={inputClass} /><input name="region" defaultValue={defaults.region} placeholder="地域 Region，例如 ap-nanjing" className={inputClass} /><input name="bucket" defaultValue={defaults.bucket} placeholder="Bucket，例如 gptimage-1325670071" className={inputClass} /><input name="secretId" defaultValue={defaults.secretId} placeholder="SecretId" className={inputClass} /><input name="secretKey" defaultValue={defaults.secretKey} placeholder="SecretKey" type="password" className={inputClass} /><input name="pathPrefix" defaultValue={defaults.pathPrefix} placeholder="路径前缀 images" className={inputClass} /><input name="tempUrlMinutes" defaultValue={defaults.tempUrlMinutes} placeholder="临时链接分钟数，可填 60*24" inputMode="decimal" onBlur={(e) => normalizeMinuteInput(e.currentTarget)} onKeyDown={(e) => { if (e.key === 'Enter') normalizeMinuteInput(e.currentTarget) }} className={inputClass} /><button className={`${primaryButton} mt-2`}>{editingBucket ? '保存修改' : '添加存储桶'}</button></div></form><section className="rounded-xl border border-[#c3c6d7] bg-white p-6"><div className="flex items-center justify-between"><h3 className="text-lg font-semibold">存储资产</h3><span className="text-xs text-[#434655]">{buckets.length} 个桶</span></div><div className="mt-5 grid gap-3 md:grid-cols-2">{buckets.length === 0 && <div className="rounded-lg bg-[#faf8ff] p-4 text-sm text-[#434655]">暂无存储桶</div>}{buckets.map((b) => <div key={b.id} className={`rounded-lg border p-4 ${editingBucket?.id === b.id ? 'border-[#191b23] bg-white' : 'border-[#c3c6d7] bg-[#faf8ff]'}`}><div className="flex items-center justify-between gap-3"><div className="font-medium">{b.name}</div><div className="rounded-full bg-[#ededf9] px-2 py-1 text-xs text-[#434655]">{b.imageCount} 张</div></div><div className="mt-3 break-all font-mono text-xs leading-5 text-[#434655]">{b.bucket} · {b.region}</div><div className="mt-3 text-xs text-[#434655]">前缀 {b.pathPrefix || '-'} · 临时链接 {b.tempUrlMinutes} 分钟</div><div className="mt-4 flex items-center gap-4"><button type="button" onClick={() => setEditingBucket(b)} className="text-xs font-semibold text-[#004ac6] hover:opacity-80">编辑</button><button type="button" onClick={() => { if (window.confirm(`确定删除存储桶“${b.name}”？`)) void deleteBucket(b) }} className="text-xs font-semibold text-[#ba1a1a] hover:opacity-80">删除</button></div></div>)}</div></section></div>
 }
