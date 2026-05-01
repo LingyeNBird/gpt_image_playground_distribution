@@ -66,6 +66,29 @@ func TestAdminBucketsCreateListAndEdit(t *testing.T) {
 	if payload.Buckets[0].Name != "编辑后" || payload.Buckets[0].Region != "ap-shanghai" || payload.Buckets[0].Bucket != "edited-1325670071" || payload.Buckets[0].PathPrefix != "edited" || payload.Buckets[0].TempURLMinutes != 1440 {
 		t.Fatalf("listed bucket not updated: %#v", payload.Buckets[0])
 	}
+	if payload.Buckets[0].SecretID != "sid2" || payload.Buckets[0].SecretKey != "skey2" {
+		t.Fatalf("listed bucket should include editable credentials for admin: %#v", payload.Buckets[0])
+	}
+}
+
+func TestAdminBucketsDelete(t *testing.T) {
+	s := newBucketTestServer(t)
+	create := performAdminRequest(s, http.MethodPost, "/api/admin/buckets", `{"name":"待删除","region":"ap-nanjing","bucket":"gptimage-1325670071","secretId":"sid","secretKey":"skey"}`)
+	if create.Code != http.StatusOK {
+		t.Fatalf("create bucket status=%d body=%s", create.Code, create.Body.String())
+	}
+
+	var id string
+	for bucketID := range s.store.snapshot().Buckets {
+		id = bucketID
+	}
+	deleteResp := performAdminRequest(s, http.MethodDelete, "/api/admin/buckets/"+id, "")
+	if deleteResp.Code != http.StatusOK {
+		t.Fatalf("delete bucket status=%d body=%s", deleteResp.Code, deleteResp.Body.String())
+	}
+	if got := len(s.store.snapshot().Buckets); got != 0 {
+		t.Fatalf("expected buckets to be deleted, got %d", got)
+	}
 }
 
 func TestAdminBucketsRejectMissingRegionOrBucket(t *testing.T) {

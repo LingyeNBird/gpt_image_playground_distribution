@@ -320,8 +320,27 @@ func appendAudit(st *AppState, typ, title, detail, userID, username string) {
 
 func (s *Server) handleAdminBucketByID(w http.ResponseWriter, r *http.Request, sess *Session) {
 	id := strings.TrimPrefix(r.URL.Path, "/api/admin/buckets/")
-	if r.Method != http.MethodPut {
+	if r.Method != http.MethodPut && r.Method != http.MethodDelete {
 		methodNotAllowed(w)
+		return
+	}
+	if r.Method == http.MethodDelete {
+		var deletedName string
+		err := s.store.with(func(st *AppState) error {
+			current := st.Buckets[id]
+			if current == nil {
+				return errors.New("存储桶不存在")
+			}
+			deletedName = current.Name
+			delete(st.Buckets, id)
+			appendAudit(st, "bucket_delete", "存储桶已删除", fmt.Sprintf("管理员删除了存储桶“%s”。", deletedName), "admin", "管理员")
+			return nil
+		})
+		if err != nil {
+			httpError(w, 404, err.Error())
+			return
+		}
+		writeJSON(w, map[string]any{"ok": true})
 		return
 	}
 	var req BucketConfig
@@ -840,7 +859,7 @@ func (s *Server) handleAdminBuckets(w http.ResponseWriter, r *http.Request, sess
 		state := s.store.snapshot()
 		out := []map[string]any{}
 		for _, b := range state.Buckets {
-			out = append(out, map[string]any{"id": b.ID, "name": b.Name, "region": b.Region, "bucket": b.Bucket, "pathPrefix": b.PathPrefix, "tempUrlMinutes": b.TempURLMinutes, "imageCount": s.countBucketImages(b), "createdAt": b.CreatedAt})
+			out = append(out, map[string]any{"id": b.ID, "name": b.Name, "region": b.Region, "bucket": b.Bucket, "secretId": b.SecretID, "secretKey": b.SecretKey, "pathPrefix": b.PathPrefix, "tempUrlMinutes": b.TempURLMinutes, "imageCount": s.countBucketImages(b), "createdAt": b.CreatedAt})
 		}
 		sort.Slice(out, func(i, j int) bool { return toInt64(out[i]["createdAt"]) > toInt64(out[j]["createdAt"]) })
 		writeJSON(w, map[string]any{"buckets": out})
