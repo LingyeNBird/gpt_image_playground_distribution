@@ -89,6 +89,10 @@ func TestAdminBucketsDelete(t *testing.T) {
 	if got := len(s.store.snapshot().Buckets); got != 0 {
 		t.Fatalf("expected buckets to be deleted, got %d", got)
 	}
+	state := s.store.snapshot()
+	if len(state.AuditLogs) == 0 || state.AuditLogs[0].Type != "bucket_delete" {
+		t.Fatalf("expected bucket delete audit log, got %#v", state.AuditLogs)
+	}
 }
 
 func TestAdminBucketsRejectMissingRegionOrBucket(t *testing.T) {
