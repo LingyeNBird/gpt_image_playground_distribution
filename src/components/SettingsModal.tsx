@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { useStore } from '../store'
 import { useCloseOnEscape } from '../hooks/useCloseOnEscape'
 import { apiRequest } from '../lib/backend'
+import { AdminButton, AdminInput, AdminSelect } from './adminUi'
 
 type AdminSettings = { baseUrl: string; apiKey: string; model: string; timeout: number; apiMode: string; codexCli: boolean }
 
@@ -82,9 +83,9 @@ export default function SettingsModal() {
       <div className="relative z-10 max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-3xl border border-white/50 bg-white/95 p-5 shadow-2xl ring-1 ring-black/5 animate-modal-in dark:border-white/[0.08] dark:bg-gray-900/95 dark:ring-white/10">
         <div className="mb-5 flex items-center justify-between gap-4">
           <h3 className="text-base font-semibold text-gray-800 dark:text-gray-100">{isAdmin ? '管理员设置' : '用户设置'}</h3>
-          <button onClick={handleClose} className="rounded-full p-1 text-gray-400 transition hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-white/[0.06] dark:hover:text-gray-200" aria-label="关闭">
+          <AdminButton onClick={handleClose} variant="ghost" size="icon" className="rounded-full text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-white/[0.06] dark:hover:text-gray-200" aria-label="关闭">
             <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
-          </button>
+          </AdminButton>
         </div>
         {message && <div className={`mb-4 rounded-xl px-3 py-2 text-sm ${message.type === 'error' ? 'bg-red-50 text-red-600 dark:bg-red-500/10 dark:text-red-300' : message.type === 'info' ? 'bg-blue-50 text-blue-600 dark:bg-blue-500/10 dark:text-blue-300' : 'bg-green-50 text-green-600 dark:bg-green-500/10 dark:text-green-300'}`}>{message.text}</div>}
         <section>
@@ -107,38 +108,38 @@ export default function SettingsModal() {
               <label className="block md:col-span-2">
                 <span className="text-xs text-gray-500">上游 API URL</span>
                 <div className="mt-1 flex gap-2">
-                  <input value={adminSettings.baseUrl} onChange={(e) => setAdminSettings({ ...adminSettings, baseUrl: e.target.value })} className="min-w-0 flex-1 rounded-xl border bg-transparent px-3 py-2" />
-                  <button type="button" disabled={testing !== null} onClick={() => testAdminSetting('url')} className="rounded-xl border border-blue-200 bg-blue-50 px-4 py-2 text-sm font-medium text-blue-600 transition hover:bg-blue-100 disabled:opacity-60 dark:border-blue-500/20 dark:bg-blue-500/10 dark:text-blue-300">{testing === 'url' ? '测试中…' : '测试'}</button>
+                  <AdminInput value={adminSettings.baseUrl} onChange={(e) => setAdminSettings({ ...adminSettings, baseUrl: e.target.value })} className="min-w-0 flex-1" />
+                  <AdminButton type="button" size="sm" variant="secondary" disabled={testing !== null} onClick={() => testAdminSetting('url')}>{testing === 'url' ? '测试中…' : '测试'}</AdminButton>
                 </div>
               </label>
               <label className="block md:col-span-2">
                 <span className="text-xs text-gray-500">上游 API Key</span>
                 <div className="mt-1 flex gap-2">
-                  <input type="password" value={adminSettings.apiKey} onChange={(e) => setAdminSettings({ ...adminSettings, apiKey: e.target.value })} className="min-w-0 flex-1 rounded-xl border bg-transparent px-3 py-2" />
-                  <button type="button" disabled={testing !== null} onClick={() => testAdminSetting('key')} className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-2 text-sm font-medium text-emerald-600 transition hover:bg-emerald-100 disabled:opacity-60 dark:border-emerald-500/20 dark:bg-emerald-500/10 dark:text-emerald-300">{testing === 'key' ? '验证中…' : '验证'}</button>
+                  <AdminInput type="password" value={adminSettings.apiKey} onChange={(e) => setAdminSettings({ ...adminSettings, apiKey: e.target.value })} className="min-w-0 flex-1" />
+                  <AdminButton type="button" size="sm" variant="secondary" disabled={testing !== null} onClick={() => testAdminSetting('key')}>{testing === 'key' ? '验证中…' : '验证'}</AdminButton>
                 </div>
               </label>
               <label className="block">
                 <span className="text-xs text-gray-500">模型</span>
-                <input value={adminSettings.model} onChange={(e) => setAdminSettings({ ...adminSettings, model: e.target.value })} className="mt-1 w-full rounded-xl border bg-transparent px-3 py-2" />
+                <AdminInput value={adminSettings.model} onChange={(e) => setAdminSettings({ ...adminSettings, model: e.target.value })} className="mt-1" />
               </label>
               <label className="block">
                 <span className="text-xs text-gray-500">超时秒数</span>
-                <input type="number" value={adminSettings.timeout} onChange={(e) => setAdminSettings({ ...adminSettings, timeout: Number(e.target.value) })} className="mt-1 w-full rounded-xl border bg-transparent px-3 py-2" />
+                <AdminInput type="number" value={adminSettings.timeout} onChange={(e) => setAdminSettings({ ...adminSettings, timeout: Number(e.target.value) })} className="mt-1" />
               </label>
               <label className="block">
                 <span className="text-xs text-gray-500">接口模式</span>
-                <select value={adminSettings.apiMode} onChange={(e) => setAdminSettings({ ...adminSettings, apiMode: e.target.value })} className="mt-1 w-full rounded-xl border bg-transparent px-3 py-2">
+                <AdminSelect value={adminSettings.apiMode} onChange={(e) => setAdminSettings({ ...adminSettings, apiMode: e.target.value })} className="mt-1">
                   <option value="images">Images API</option>
                   <option value="responses">Responses API</option>
-                </select>
+                </AdminSelect>
               </label>
               <label className="flex items-center gap-2 text-sm">
                 <input type="checkbox" checked={adminSettings.codexCli} onChange={(e) => setAdminSettings({ ...adminSettings, codexCli: e.target.checked })} />
                 Codex CLI 兼容
               </label>
             </div>
-            <button onClick={saveAdminSettings} className="mt-4 rounded-xl bg-blue-500 px-4 py-2 text-white">保存上游设置</button>
+            <AdminButton onClick={saveAdminSettings} variant="primary" className="mt-4">保存上游设置</AdminButton>
           </section>
         )}
       </div>

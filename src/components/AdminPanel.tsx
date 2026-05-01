@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
 import { apiRequest } from '../lib/backend'
-import { AdminButton, AdminCard, AdminInput, AdminModal, AdminNotice, AdminTag, AdminTextButton, AdminToast, MaterialIcon, adminTheme } from './adminUi'
+import { AdminButton, AdminCard, AdminInput, AdminModal, AdminNotice, AdminTabButton, AdminTag, AdminTextButton, AdminToast, MaterialIcon } from './adminUi'
 import { bucketConfirmCopy, bucketEditDefaults, bucketPayloadFromFields, normalizeMinuteInput, toastTypeForError } from './bucketForm'
 
 type AdminUser = { id: string; username: string; disabled: boolean; banned: boolean; quotaTotal: number; quotaUsed: number; quotaRemaining: number; allowDirect: boolean; allowBucket: boolean; online: boolean; runningTasks: number }
@@ -158,9 +158,9 @@ export default function AdminPanel() {
 
       <div className="mb-10 flex gap-1 border-b border-[#c3c6d7]">
         {(['users','storage','updates'] as const).map((item) => (
-          <button key={item} onClick={() => setTab(item)} className={`px-4 py-2 text-sm font-medium leading-none transition-colors ${tab === item ? 'border-b-2 border-[#191b23] text-[#191b23]' : 'text-[#434655] hover:text-[#191b23]'}`}>
+          <AdminTabButton key={item} active={tab === item} onClick={() => setTab(item)}>
             {item === 'users' ? '用户' : item === 'storage' ? '存储' : '更新'}
-          </button>
+          </AdminTabButton>
         ))}
       </div>
 
@@ -279,10 +279,9 @@ function StatusPill({ user }: { user: AdminUser }) {
 }
 
 function ModeSwitch({ user, patchUser }: { user: AdminUser; patchUser: (id: string, patch: Partial<AdminUser>) => Promise<void> }) {
-  const modeClass = (enabled: boolean) => `rounded-md border px-2.5 py-1 text-xs font-semibold transition-colors ${enabled ? 'border-[#191b23] bg-[#191b23] text-white shadow-sm' : 'border-[#c3c6d7] bg-white text-[#434655] hover:border-[#191b23] hover:text-[#191b23]'}`
   return <div className="flex w-fit gap-1.5 rounded-lg p-1">
-    <button type="button" onClick={() => patchUser(user.id, { allowDirect: !user.allowDirect })} className={modeClass(user.allowDirect)}>直传</button>
-    <button type="button" onClick={() => patchUser(user.id, { allowBucket: !user.allowBucket })} className={modeClass(user.allowBucket)}>存储桶</button>
+    <AdminButton type="button" size="sm" variant={user.allowDirect ? 'primary' : 'secondary'} onClick={() => patchUser(user.id, { allowDirect: !user.allowDirect })}>直传</AdminButton>
+    <AdminButton type="button" size="sm" variant={user.allowBucket ? 'primary' : 'secondary'} onClick={() => patchUser(user.id, { allowBucket: !user.allowBucket })}>存储桶</AdminButton>
   </div>
 }
 

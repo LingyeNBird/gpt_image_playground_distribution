@@ -5,6 +5,7 @@ import { useVersionCheck } from '../hooks/useVersionCheck'
 import HelpModal from './HelpModal'
 import { logout } from '../lib/backend'
 import { apiRequest } from '../lib/backend'
+import { AdminButton } from './adminUi'
 
 export default function Header({ adminButtonLabel = '后台', onOpenAdmin }: { adminButtonLabel?: string; onOpenAdmin?: () => void }) {
   const setShowSettings = useStore((s) => s.setShowSettings)
@@ -56,9 +57,11 @@ export default function Header({ adminButtonLabel = '后台', onOpenAdmin }: { a
           <span className="hidden sm:inline text-xs text-gray-500 mr-2">
             {currentUser?.role === 'admin' ? '管理员' : `${currentUser?.username} · 剩余额度 ${currentUser?.quotaRemaining ?? 0}`}
           </span>
-          <button
+          <AdminButton
             onClick={() => setShowHelp(true)}
-            className="p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-900 transition-colors"
+            variant="ghost"
+            size="icon"
+            className="rounded-lg hover:bg-gray-100 dark:hover:bg-gray-900"
             title="操作指南"
           >
             <svg
@@ -74,10 +77,12 @@ export default function Header({ adminButtonLabel = '后台', onOpenAdmin }: { a
               <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" />
               <path d="M12 17h.01" />
             </svg>
-          </button>
-          <button
+          </AdminButton>
+          <AdminButton
             onClick={() => setShowSettings(true)}
-            className="p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-900 transition-colors"
+            variant="ghost"
+            size="icon"
+            className="rounded-lg hover:bg-gray-100 dark:hover:bg-gray-900"
             title="设置"
           >
             <svg
@@ -99,23 +104,27 @@ export default function Header({ adminButtonLabel = '后台', onOpenAdmin }: { a
                 d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"
               />
             </svg>
-          </button>
+          </AdminButton>
           {currentUser?.role === 'admin' && onOpenAdmin && (
-            <button
+            <AdminButton
               onClick={onOpenAdmin}
-              className="rounded-lg px-3 py-2 text-xs font-medium text-blue-600 transition hover:bg-blue-50 dark:text-blue-300 dark:hover:bg-blue-500/10"
+              variant="ghost"
+              size="sm"
+              className="rounded-lg text-blue-600 hover:bg-blue-50 dark:text-blue-300 dark:hover:bg-blue-500/10"
               title={adminButtonLabel === '后台' ? '进入分发管理后台' : '返回生图页面'}
             >
               {adminButtonLabel}
-            </button>
+            </AdminButton>
           )}
-          <button
+          <AdminButton
             onClick={async () => { await logout(); setCurrentUser(null) }}
-            className="p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-900 transition-colors text-xs text-gray-500"
+            variant="ghost"
+            size="sm"
+            className="rounded-lg text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-900"
             title="退出登录"
           >
             退出
-          </button>
+          </AdminButton>
         </div>
       </div>
       {showHelp && <HelpModal onClose={() => setShowHelp(false)} />}
