@@ -1,7 +1,8 @@
-import type { ButtonHTMLAttributes, InputHTMLAttributes, ReactNode } from 'react'
+import type { ButtonHTMLAttributes, InputHTMLAttributes, ReactNode, SelectHTMLAttributes } from 'react'
 
 export type AdminTone = 'default' | 'primary' | 'danger' | 'success' | 'info'
-export type AdminButtonVariant = 'primary' | 'secondary' | 'ghost' | 'danger'
+export type AdminButtonVariant = 'primary' | 'secondary' | 'ghost' | 'danger' | 'success'
+export type AdminButtonSize = 'sm' | 'md' | 'icon'
 
 export const adminTheme = {
   surfaceLow: '#f3f3fe',
@@ -17,14 +18,20 @@ export function MaterialIcon({ name, className = '' }: { name: string; className
   return <span className={`material-symbols-outlined ${className}`}>{name}</span>
 }
 
-export function AdminButton({ variant = 'secondary', icon, className = '', children, ...props }: ButtonHTMLAttributes<HTMLButtonElement> & { variant?: AdminButtonVariant; icon?: string }) {
+export function AdminButton({ variant = 'secondary', size = 'md', icon, className = '', children, ...props }: ButtonHTMLAttributes<HTMLButtonElement> & { variant?: AdminButtonVariant; size?: AdminButtonSize; icon?: string }) {
   const variants: Record<AdminButtonVariant, string> = {
     primary: 'bg-[#191b23] text-white hover:opacity-90 disabled:opacity-60',
     secondary: 'border border-[#c3c6d7] bg-white text-[#434655] hover:bg-[#faf8ff] disabled:opacity-60',
     ghost: 'text-[#434655] hover:text-[#191b23] disabled:opacity-60',
     danger: 'bg-[#ba1a1a] text-white hover:bg-[#93000a] disabled:opacity-60',
+    success: 'border border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100 disabled:opacity-60',
   }
-  return <button {...props} className={`inline-flex h-[42px] items-center justify-center gap-2 rounded px-6 py-2 text-sm font-medium transition-colors ${variants[variant]} ${className}`}>
+  const sizes: Record<AdminButtonSize, string> = {
+    sm: 'h-[34px] px-3 py-1.5 text-xs',
+    md: 'h-[42px] px-6 py-2 text-sm',
+    icon: 'h-9 w-9 p-0 text-sm',
+  }
+  return <button {...props} className={`inline-flex items-center justify-center gap-2 rounded font-medium transition-colors ${sizes[size]} ${variants[variant]} ${className}`}>
     {icon && <MaterialIcon name={icon} className="text-[18px]" />}
     {children}
   </button>
@@ -41,8 +48,16 @@ export function AdminTextButton({ tone = 'primary', className = '', children, ..
   return <button {...props} className={`text-xs font-semibold transition ${tones[tone]} ${className}`}>{children}</button>
 }
 
+export function AdminTabButton({ active, className = '', children, ...props }: ButtonHTMLAttributes<HTMLButtonElement> & { active: boolean }) {
+  return <button {...props} className={`px-4 py-2 text-sm font-medium leading-none transition-colors ${active ? 'border-b-2 border-[#191b23] text-[#191b23]' : 'text-[#434655] hover:text-[#191b23]'} ${className}`}>{children}</button>
+}
+
 export function AdminInput({ className = '', ...props }: InputHTMLAttributes<HTMLInputElement>) {
   return <input {...props} className={`h-[42px] w-full rounded border border-[#c3c6d7] bg-[#f3f3fe] px-4 py-2 text-sm text-[#191b23] outline-none transition-colors placeholder:text-[#737686] focus:border-[#191b23] focus:ring-1 focus:ring-[#191b23] ${className}`} />
+}
+
+export function AdminSelect({ className = '', children, ...props }: SelectHTMLAttributes<HTMLSelectElement>) {
+  return <select {...props} className={`h-[42px] w-full rounded border border-[#c3c6d7] bg-[#f3f3fe] px-4 py-2 text-sm text-[#191b23] outline-none transition-colors focus:border-[#191b23] focus:ring-1 focus:ring-[#191b23] ${className}`}>{children}</select>
 }
 
 export function AdminCard({ children, className = '' }: { children: ReactNode; className?: string }) {
