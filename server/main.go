@@ -96,7 +96,8 @@ type AdminSettings struct {
 type BucketConfig struct {
 	ID             string `json:"id"`
 	Name           string `json:"name"`
-	BucketURL      string `json:"bucketUrl"`
+	Region         string `json:"region"`
+	Bucket         string `json:"bucket"`
 	SecretID       string `json:"secretId"`
 	SecretKey      string `json:"secretKey"`
 	PathPrefix     string `json:"pathPrefix"`
@@ -214,6 +215,7 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/admin/users", s.requireAdmin(s.handleAdminUsers))
 	mux.HandleFunc("/api/admin/users/", s.requireAdmin(s.handleAdminUserByID))
 	mux.HandleFunc("/api/admin/buckets", s.requireAdmin(s.handleAdminBuckets))
+	mux.HandleFunc("/api/admin/buckets/", s.requireAdmin(s.handleAdminBucketByID))
 	mux.HandleFunc("/api/admin/failures", s.requireAdmin(s.handleAdminFailures))
 	mux.HandleFunc("/api/admin/audit", s.requireAdmin(s.handleAdminAudit))
 	mux.HandleFunc("/api/admin/update/check", s.requireAdmin(s.handleUpdateCheck))
@@ -314,6 +316,38 @@ func appendAudit(st *AppState, typ, title, detail, userID, username string) {
 	if len(st.AuditLogs) > 5000 {
 		st.AuditLogs = st.AuditLogs[:5000]
 	}
+}
+
+func (s *Server) handleAdminBucketByID(w http.ResponseWriter, r *http.Request, sess *Session) {
+	id := strings.TrimPrefix(r.URL.Path, "/api/admin/buckets/")
+	if r.Method != http.MethodPut {
+		methodNotAllowed(w)
+		return
+	}
+	var req BucketConfig
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if err := normalizeBucketConfig(&req); err != nil {
+		httpError(w, 400, err.Error())
+		return
+	}
+	err := s.store.with(func(st *AppState) error {
+		current := st.Buckets[id]
+		if current == nil {
+			return errors.New("存储桶不存在")
+		}
+		req.ID = id
+		req.CreatedAt = current.CreatedAt
+		st.Buckets[id] = &req
+		appendAudit(st, "bucket_update", "存储桶已更新", fmt.Sprintf("管理员更新了存储桶“%s”。", req.Name), "admin", "管理员")
+		return nil
+	})
+	if err != nil {
+		httpError(w, 404, err.Error())
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true, "bucket": req})
 }
 
 func (st *Store) snapshot() AppState {
@@ -806,27 +840,22 @@ func (s *Server) handleAdminBuckets(w http.ResponseWriter, r *http.Request, sess
 		state := s.store.snapshot()
 		out := []map[string]any{}
 		for _, b := range state.Buckets {
-			out = append(out, map[string]any{"id": b.ID, "name": b.Name, "bucketUrl": b.BucketURL, "pathPrefix": b.PathPrefix, "tempUrlMinutes": b.TempURLMinutes, "imageCount": s.countBucketImages(b), "createdAt": b.CreatedAt})
+			out = append(out, map[string]any{"id": b.ID, "name": b.Name, "region": b.Region, "bucket": b.Bucket, "pathPrefix": b.PathPrefix, "tempUrlMinutes": b.TempURLMinutes, "imageCount": s.countBucketImages(b), "createdAt": b.CreatedAt})
 		}
+		sort.Slice(out, func(i, j int) bool { return toInt64(out[i]["createdAt"]) > toInt64(out[j]["createdAt"]) })
 		writeJSON(w, map[string]any{"buckets": out})
 	case http.MethodPost:
 		var req BucketConfig
 		if !decodeJSON(w, r, &req) {
 			return
 		}
-		if req.BucketURL == "" || req.SecretID == "" || req.SecretKey == "" {
-			httpError(w, 400, "请填写 COS Bucket URL、SecretId、SecretKey")
+		if err := normalizeBucketConfig(&req); err != nil {
+			httpError(w, 400, err.Error())
 			return
-		}
-		if req.TempURLMinutes <= 0 {
-			req.TempURLMinutes = 60
 		}
 		err := s.store.with(func(st *AppState) error {
 			req.ID = randomHex(12)
 			req.CreatedAt = nowMs()
-			if req.Name == "" {
-				req.Name = req.BucketURL
-			}
 			st.Buckets[req.ID] = &req
 			appendAudit(st, "bucket_create", "存储桶已添加", fmt.Sprintf("管理员连接了存储桶“%s”。", req.Name), "admin", "管理员")
 			return nil
@@ -1043,7 +1072,7 @@ func (s *Server) callUpstream(settings AdminSettings, task *GenerationTask, inpu
 }
 
 func (s *Server) uploadToCOS(b *BucketConfig, taskID string, idx int, dataURL string) (string, string, error) {
-	u, err := url.Parse(b.BucketURL)
+	u, err := url.Parse(cosBucketURL(b))
 	if err != nil {
 		return "", "", err
 	}
@@ -1420,6 +1449,19 @@ func toInt(v any) int {
 	}
 }
 
+func toInt64(v any) int64 {
+	switch n := v.(type) {
+	case int64:
+		return n
+	case int:
+		return int64(n)
+	case float64:
+		return int64(n)
+	default:
+		return 0
+	}
+}
+
 func pickActual(payload map[string]any) map[string]any {
 	out := map[string]any{}
 	for _, k := range []string{"size", "quality", "output_format", "output_compression", "moderation", "n"} {
@@ -1505,17 +1547,41 @@ func firstBucket(buckets map[string]*BucketConfig) *BucketConfig {
 	return nil
 }
 
+func normalizeBucketConfig(req *BucketConfig) error {
+	req.Name = strings.TrimSpace(req.Name)
+	req.Region = strings.TrimSpace(req.Region)
+	req.Bucket = strings.TrimSpace(req.Bucket)
+	req.SecretID = strings.TrimSpace(req.SecretID)
+	req.PathPrefix = strings.Trim(strings.TrimSpace(req.PathPrefix), "/")
+	if req.Region == "" || req.Bucket == "" || req.SecretID == "" || req.SecretKey == "" {
+		return errors.New("请填写 COS Region、Bucket、SecretId、SecretKey")
+	}
+	if req.TempURLMinutes <= 0 {
+		req.TempURLMinutes = 60
+	}
+	if req.Name == "" {
+		req.Name = req.Bucket
+	}
+	return nil
+}
+
+func cosBucketURL(b *BucketConfig) string {
+	return fmt.Sprintf("https://%s.cos.%s.myqcloud.com", strings.TrimSpace(b.Bucket), strings.TrimSpace(b.Region))
+}
+
 func (s *Server) countBucketImages(b *BucketConfig) int {
-	u, err := url.Parse(b.BucketURL)
+	u, err := url.Parse(cosBucketURL(b))
 	if err != nil {
 		return 0
 	}
-	client := cos.NewClient(&cos.BaseURL{BucketURL: u}, &http.Client{Transport: &cos.AuthorizationTransport{SecretID: b.SecretID, SecretKey: b.SecretKey}})
+	client := cos.NewClient(&cos.BaseURL{BucketURL: u}, &http.Client{Timeout: 3 * time.Second, Transport: &cos.AuthorizationTransport{SecretID: b.SecretID, SecretKey: b.SecretKey}})
 	prefix := strings.Trim(strings.TrimSpace(b.PathPrefix), "/")
 	if prefix != "" {
 		prefix += "/"
 	}
-	res, _, err := client.Bucket.Get(context.Background(), &cos.BucketGetOptions{Prefix: prefix, MaxKeys: 1000})
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	res, _, err := client.Bucket.Get(ctx, &cos.BucketGetOptions{Prefix: prefix, MaxKeys: 1000})
 	if err != nil {
 		return 0
 	}
