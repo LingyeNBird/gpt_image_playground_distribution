@@ -251,9 +251,10 @@ function StatusPill({ user }: { user: AdminUser }) {
 }
 
 function ModeSwitch({ user, patchUser }: { user: AdminUser; patchUser: (id: string, patch: Partial<AdminUser>) => Promise<void> }) {
-  return <div className="flex w-fit rounded border border-[#c3c6d7] bg-[#f3f3fe] p-0.5">
-    <button onClick={() => patchUser(user.id, { allowDirect: !user.allowDirect })} className={`rounded px-2 py-1 text-xs font-medium ${user.allowDirect ? 'bg-white text-[#191b23] shadow-sm' : 'text-[#434655]'}`}>直传</button>
-    <button onClick={() => patchUser(user.id, { allowBucket: !user.allowBucket })} className={`rounded px-2 py-1 text-xs font-medium ${user.allowBucket ? 'bg-white text-[#191b23] shadow-sm' : 'text-[#434655]'}`}>存储桶</button>
+  const modeClass = (enabled: boolean) => `rounded-md border px-2.5 py-1 text-xs font-semibold transition-colors ${enabled ? 'border-[#191b23] bg-[#191b23] text-white shadow-sm' : 'border-[#c3c6d7] bg-white text-[#434655] hover:border-[#191b23] hover:text-[#191b23]'}`
+  return <div className="flex w-fit gap-1.5 rounded-lg border border-[#c3c6d7] bg-[#f3f3fe] p-1">
+    <button onClick={() => patchUser(user.id, { allowDirect: !user.allowDirect })} className={modeClass(user.allowDirect)}>直传</button>
+    <button onClick={() => patchUser(user.id, { allowBucket: !user.allowBucket })} className={modeClass(user.allowBucket)}>存储桶</button>
   </div>
 }
 
@@ -276,7 +277,6 @@ function AuditLog({ audit, failures, loading, hasMore, loadMore }: { audit: Audi
       {!loading && hasMore && <button onClick={() => void loadMore()} className="w-full rounded-lg border border-[#c3c6d7] bg-[#faf8ff] px-3 py-2 text-xs font-medium text-[#434655] hover:bg-[#f3f3fe]">加载更旧日志</button>}
       {!loading && !hasMore && entries.length > 0 && <div className="px-3 py-2 text-center text-xs text-[#737686]">已显示全部日志</div>}
     </div>
-    <div className="rounded-b-xl border-t border-[#c3c6d7] bg-[#faf8ff] p-4 text-center text-[11px] font-bold uppercase tracking-wider text-[#191b23] dark:border-white/[0.08] dark:bg-white/[0.03]">查看详细审计日志</div>
   </aside>
 }
 
