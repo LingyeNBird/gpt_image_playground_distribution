@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
 import { apiRequest } from '../lib/backend'
+import { bucketPayloadFromFields, normalizeMinuteInput } from './bucketForm'
 
 type AdminUser = { id: string; username: string; disabled: boolean; banned: boolean; quotaTotal: number; quotaUsed: number; quotaRemaining: number; allowDirect: boolean; allowBucket: boolean; online: boolean; runningTasks: number }
-type Bucket = { id: string; name: string; bucketUrl: string; pathPrefix: string; tempUrlMinutes: number; imageCount: number }
+type Bucket = { id: string; name: string; region: string; bucket: string; pathPrefix: string; tempUrlMinutes: number; imageCount: number }
 type Failure = { id: string; username: string; prompt: string; error: string; createdAt: number }
 type AuditEntry = { id: string; type: string; title: string; detail: string; userId?: string; username?: string; createdAt: number }
 type AuditPage = { audit: AuditEntry[]; total: number; offset: number; limit: number; hasMore: boolean }
@@ -32,6 +33,7 @@ export default function AdminPanel() {
   const [auditHasMore, setAuditHasMore] = useState(false)
   const [auditLoading, setAuditLoading] = useState(false)
   const [message, setMessage] = useState('')
+  const [editingBucket, setEditingBucket] = useState<Bucket | null>(null)
   const [usersLoading, setUsersLoading] = useState(true)
   const [usersError, setUsersError] = useState('')
 
@@ -96,12 +98,31 @@ export default function AdminPanel() {
     void refreshAudit().catch(() => undefined)
   }
 
-  const addBucket = async (e: React.FormEvent<HTMLFormElement>) => {
+  const saveBucket = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault()
-    const fd = new FormData(e.currentTarget)
-    await apiRequest('/api/admin/buckets', { method: 'POST', body: JSON.stringify(Object.fromEntries(fd.entries())) })
-    e.currentTarget.reset()
-    await load()
+    setMessage('')
+    const form = e.currentTarget
+    const fd = new FormData(form)
+    let payload: ReturnType<typeof bucketPayloadFromFields>
+    try {
+      payload = bucketPayloadFromFields(Object.fromEntries(fd.entries()) as Record<string, FormDataEntryValue>)
+    } catch (err) {
+      setMessage(`添加存储桶失败：${err instanceof Error ? err.message : String(err)}`)
+      return
+    }
+    try {
+      if (editingBucket) {
+        await apiRequest(`/api/admin/buckets/${editingBucket.id}`, { method: 'PUT', body: JSON.stringify(payload) })
+      } else {
+        await apiRequest('/api/admin/buckets', { method: 'POST', body: JSON.stringify(payload) })
+      }
+      form.reset()
+      setEditingBucket(null)
+      setMessage(editingBucket ? '存储桶已更新' : '存储桶已添加')
+      await load()
+    } catch (err) {
+      setMessage(`${editingBucket ? '更新' : '添加'}存储桶失败：${err instanceof Error ? err.message : String(err)}`)
+    }
   }
 
   return (
@@ -130,7 +151,7 @@ export default function AdminPanel() {
       {message && <div className="mb-4 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700 dark:border-emerald-500/20 dark:bg-emerald-500/10 dark:text-emerald-300">{message}</div>}
 
         {tab === 'users' && <UsersTab users={users} audit={audit} failures={failures} usersLoading={usersLoading} usersError={usersError} auditLoading={auditLoading} auditHasMore={auditHasMore} patchUser={patchUser} reload={loadUsers} setUsers={setUsers} refreshAudit={refreshAudit} loadOlderAudit={() => loadAuditPage(audit.length)} />}
-      {tab === 'storage' && <StorageTab buckets={buckets} addBucket={addBucket} />}
+      {tab === 'storage' && <StorageTab buckets={buckets} editingBucket={editingBucket} setEditingBucket={setEditingBucket} saveBucket={saveBucket} />}
       {tab === 'updates' && <UpdatesTab setGlobalMessage={setMessage} />}
       </main>
     </div>
@@ -244,7 +265,7 @@ function Avatar({ name, muted }: { name: string; muted?: boolean }) {
 }
 
 function StatusPill({ user }: { user: AdminUser }) {
-  if (user.banned) return <span className="inline-flex items-center rounded-full border border-red-200 bg-red-50 px-2 py-1 text-xs font-medium text-red-700">已封禁</span>
+  if (user.banned) return <span className="inline-flex items-center rounded-full border border-red-200 bg-red-50 px-2 py-1 text-xs font-medium text-red-700">封禁</span>
   if (user.runningTasks > 0) return <span className="inline-flex items-center rounded-full border border-[#b4c5ff] bg-[#dbe1ff] px-2 py-1 text-xs font-medium text-[#00174b]"><span className="mr-1.5 h-1.5 w-1.5 rounded-full bg-[#004ac6]" />生成中</span>
   if (user.online) return <span className="inline-flex items-center rounded-full border border-[#c3c6d7] bg-[#ededf9] px-2 py-1 text-xs font-medium text-[#191b23]"><span className="mr-1.5 h-1.5 w-1.5 rounded-full bg-green-500" />在线</span>
   return <span className="inline-flex items-center rounded-full border border-[#c3c6d7] bg-[#ededf9] px-2 py-1 text-xs font-medium text-[#434655]">离线</span>
@@ -252,7 +273,7 @@ function StatusPill({ user }: { user: AdminUser }) {
 
 function ModeSwitch({ user, patchUser }: { user: AdminUser; patchUser: (id: string, patch: Partial<AdminUser>) => Promise<void> }) {
   const modeClass = (enabled: boolean) => `rounded-md border px-2.5 py-1 text-xs font-semibold transition-colors ${enabled ? 'border-[#191b23] bg-[#191b23] text-white shadow-sm' : 'border-[#c3c6d7] bg-white text-[#434655] hover:border-[#191b23] hover:text-[#191b23]'}`
-  return <div className="flex w-fit gap-1.5 rounded-lg border border-[#c3c6d7] bg-[#f3f3fe] p-1">
+  return <div className="flex w-fit gap-1.5 rounded-lg p-1">
     <button onClick={() => patchUser(user.id, { allowDirect: !user.allowDirect })} className={modeClass(user.allowDirect)}>直传</button>
     <button onClick={() => patchUser(user.id, { allowBucket: !user.allowBucket })} className={modeClass(user.allowBucket)}>存储桶</button>
   </div>
@@ -267,7 +288,7 @@ function AuditLog({ audit, failures, loading, hasMore, loadMore }: { audit: Audi
       void loadMore()
     }
   }
-  return <aside className="flex flex-col rounded-xl border border-[#c3c6d7] bg-white">
+  return <aside className="flex flex-col self-start rounded-xl border border-[#c3c6d7] bg-white">
     <div className="border-b border-[#c3c6d7] p-6"><h3 className="text-lg font-semibold leading-[1.4] text-[#191b23]">系统审计日志</h3></div>
     <div onScroll={handleScroll} className="max-h-[520px] flex-1 space-y-4 overflow-y-auto p-4 pr-3">
       {entries.length === 0 && failures.length === 0 && <AuditItem icon="✓" title="暂无活动" detail="系统操作记录会显示在这里。" time="现在" />}
@@ -313,6 +334,7 @@ function UpdatesTab({ setGlobalMessage }: { setGlobalMessage: (msg: string) => v
   return <div className="grid gap-6 lg:grid-cols-[1fr_320px]"><div className="space-y-4">{row('后端二进制', info?.backend, 'backend')}{row('前端静态资源', info?.frontend, 'frontend')}</div><aside className="rounded-xl border border-[#c3c6d7] bg-white p-6"><div className="font-semibold">Release 控制台</div><p className="mt-2 text-sm leading-6 text-[#434655]">检查 GitHub Release 中的前后端独立版本，并按需更新。</p><div className="mt-5 grid gap-2"><button disabled={busy} onClick={check} className={quietButton}>检查更新</button><button disabled={busy} onClick={restart} className="h-[36px] rounded bg-red-600 px-4 text-sm font-medium text-white disabled:bg-zinc-300">重启后端</button></div>{message && <div className="mt-4 rounded-lg bg-[#f3f3fe] px-3 py-2 text-sm text-[#434655]">{message}</div>}</aside></div>
 }
 
-function StorageTab({ buckets, addBucket }: { buckets: Bucket[]; addBucket: (e: React.FormEvent<HTMLFormElement>) => Promise<void> }) {
-  return <div className="grid gap-6 lg:grid-cols-[420px_minmax(0,1fr)]"><form onSubmit={addBucket} className="rounded-xl border border-[#c3c6d7] bg-white p-6"><h3 className="text-lg font-semibold">连接 COS 存储桶</h3><p className="mt-2 text-sm leading-6 text-[#434655]">配置后可为用户启用存储桶模式，降低直传带宽压力。</p><div className="mt-5 grid gap-3"><input name="name" placeholder="名称" className={inputClass} /><input name="bucketUrl" placeholder="Bucket URL，例如 https://xxx.cos.ap-guangzhou.myqcloud.com" className={inputClass} /><input name="secretId" placeholder="SecretId" className={inputClass} /><input name="secretKey" placeholder="SecretKey" type="password" className={inputClass} /><input name="pathPrefix" placeholder="路径前缀 images" className={inputClass} /><input name="tempUrlMinutes" placeholder="临时链接分钟数" type="number" className={inputClass} /><button className={`${primaryButton} mt-2`}>添加存储桶</button></div></form><section className="rounded-xl border border-[#c3c6d7] bg-white p-6"><div className="flex items-center justify-between"><h3 className="text-lg font-semibold">存储资产</h3><span className="text-xs text-[#434655]">{buckets.length} 个桶</span></div><div className="mt-5 grid gap-3 md:grid-cols-2">{buckets.length === 0 && <div className="rounded-lg bg-[#faf8ff] p-4 text-sm text-[#434655]">暂无存储桶</div>}{buckets.map((b) => <div key={b.id} className="rounded-lg border border-[#c3c6d7] bg-[#faf8ff] p-4"><div className="flex items-center justify-between gap-3"><div className="font-medium">{b.name}</div><div className="rounded-full bg-[#ededf9] px-2 py-1 text-xs text-[#434655]">{b.imageCount} 张</div></div><div className="mt-3 break-all font-mono text-xs leading-5 text-[#434655]">{b.bucketUrl}</div><div className="mt-3 text-xs text-[#434655]">前缀 {b.pathPrefix || '-'} · 临时链接 {b.tempUrlMinutes} 分钟</div></div>)}</div></section></div>
+function StorageTab({ buckets, editingBucket, setEditingBucket, saveBucket }: { buckets: Bucket[]; editingBucket: Bucket | null; setEditingBucket: (bucket: Bucket | null) => void; saveBucket: (e: React.FormEvent<HTMLFormElement>) => Promise<void> }) {
+  const formKey = editingBucket?.id ?? 'new-bucket'
+  return <div className="grid gap-6 lg:grid-cols-[420px_minmax(0,1fr)]"><form key={formKey} onSubmit={saveBucket} className="rounded-xl border border-[#c3c6d7] bg-white p-6"><div className="flex items-center justify-between gap-3"><h3 className="text-lg font-semibold">{editingBucket ? '编辑 COS 存储桶' : '连接 COS 存储桶'}</h3>{editingBucket && <button type="button" onClick={() => setEditingBucket(null)} className="text-xs font-medium text-[#434655] hover:text-[#191b23]">取消编辑</button>}</div><p className="mt-2 text-sm leading-6 text-[#434655]">配置后可为用户启用存储桶模式，降低直传带宽压力。</p><div className="mt-5 grid gap-3"><input name="name" defaultValue={editingBucket?.name ?? ''} placeholder="名称" className={inputClass} /><input name="region" defaultValue={editingBucket?.region ?? ''} placeholder="地域 Region，例如 ap-nanjing" className={inputClass} /><input name="bucket" defaultValue={editingBucket?.bucket ?? ''} placeholder="Bucket，例如 gptimage-1325670071" className={inputClass} /><input name="secretId" placeholder="SecretId" className={inputClass} /><input name="secretKey" placeholder="SecretKey" type="password" className={inputClass} /><input name="pathPrefix" defaultValue={editingBucket?.pathPrefix ?? ''} placeholder="路径前缀 images" className={inputClass} /><input name="tempUrlMinutes" defaultValue={editingBucket?.tempUrlMinutes ? String(editingBucket.tempUrlMinutes) : ''} placeholder="临时链接分钟数，可填 60*24" inputMode="decimal" onBlur={(e) => normalizeMinuteInput(e.currentTarget)} onKeyDown={(e) => { if (e.key === 'Enter') normalizeMinuteInput(e.currentTarget) }} className={inputClass} /><button className={`${primaryButton} mt-2`}>{editingBucket ? '保存修改' : '添加存储桶'}</button></div></form><section className="rounded-xl border border-[#c3c6d7] bg-white p-6"><div className="flex items-center justify-between"><h3 className="text-lg font-semibold">存储资产</h3><span className="text-xs text-[#434655]">{buckets.length} 个桶</span></div><div className="mt-5 grid gap-3 md:grid-cols-2">{buckets.length === 0 && <div className="rounded-lg bg-[#faf8ff] p-4 text-sm text-[#434655]">暂无存储桶</div>}{buckets.map((b) => <div key={b.id} className={`rounded-lg border p-4 ${editingBucket?.id === b.id ? 'border-[#191b23] bg-white' : 'border-[#c3c6d7] bg-[#faf8ff]'}`}><div className="flex items-center justify-between gap-3"><div className="font-medium">{b.name}</div><div className="rounded-full bg-[#ededf9] px-2 py-1 text-xs text-[#434655]">{b.imageCount} 张</div></div><div className="mt-3 break-all font-mono text-xs leading-5 text-[#434655]">{b.bucket} · {b.region}</div><div className="mt-3 text-xs text-[#434655]">前缀 {b.pathPrefix || '-'} · 临时链接 {b.tempUrlMinutes} 分钟</div><button type="button" onClick={() => setEditingBucket(b)} className="mt-4 text-xs font-semibold text-[#004ac6] hover:opacity-80">编辑</button></div>)}</div></section></div>
 }
