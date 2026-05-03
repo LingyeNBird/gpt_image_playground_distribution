@@ -40,17 +40,17 @@ export default function LoginPage() {
         {tab === 'admin' ? (
           <label className="block mb-4">
             <span className="text-xs text-gray-500">管理员密钥</span>
-            <input value={adminKey} onChange={(e) => setAdminKey(e.target.value)} type="password" className="mt-1 w-full rounded-xl border border-gray-200 dark:border-white/[0.08] bg-white dark:bg-white/[0.03] px-3 py-2 outline-none" />
+            <input name="adminKey" autoComplete="current-password" value={adminKey} onChange={(e) => setAdminKey(e.target.value)} type="password" className="mt-1 w-full rounded-xl border border-gray-200 dark:border-white/[0.08] bg-white dark:bg-white/[0.03] px-3 py-2 outline-none" />
           </label>
         ) : (
           <>
             <label className="block mb-3">
               <span className="text-xs text-gray-500">用户名</span>
-              <input value={username} onChange={(e) => setUsername(e.target.value)} className="mt-1 w-full rounded-xl border border-gray-200 dark:border-white/[0.08] bg-white dark:bg-white/[0.03] px-3 py-2 outline-none" />
+              <input name="username" autoComplete="username" value={username} onChange={(e) => setUsername(e.target.value)} className="mt-1 w-full rounded-xl border border-gray-200 dark:border-white/[0.08] bg-white dark:bg-white/[0.03] px-3 py-2 outline-none" />
             </label>
             <label className="block mb-4">
               <span className="text-xs text-gray-500">密码</span>
-              <input value={password} onChange={(e) => setPassword(e.target.value)} type="password" className="mt-1 w-full rounded-xl border border-gray-200 dark:border-white/[0.08] bg-white dark:bg-white/[0.03] px-3 py-2 outline-none" />
+              <input name="password" autoComplete={tab === 'register' ? 'new-password' : 'current-password'} value={password} onChange={(e) => setPassword(e.target.value)} type="password" className="mt-1 w-full rounded-xl border border-gray-200 dark:border-white/[0.08] bg-white dark:bg-white/[0.03] px-3 py-2 outline-none" />
             </label>
           </>
         )}

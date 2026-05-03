@@ -210,7 +210,7 @@ function UsersTab({ users, audit, failures, usersLoading, usersError, auditLoadi
             {usersLoading && <tr><td colSpan={6} className="px-2 py-8 text-center text-[#434655]">正在加载用户列表…</td></tr>}
             {!usersLoading && usersError && <tr><td colSpan={6} className="px-2 py-8 text-center text-[#ba1a1a]">用户列表加载失败：{usersError}</td></tr>}
             {!usersLoading && !usersError && users.length === 0 && <tr><td colSpan={6} className="px-2 py-8 text-center text-[#434655]">暂无用户。使用上方表单添加用户，或让用户在登录页注册。</td></tr>}
-            {!usersLoading && !usersError && users.map((u) => <tr key={u.id} className={`border-b border-[#e1e2ed] transition-colors hover:bg-[#faf8ff] ${u.banned ? 'bg-[#ffdad6]/20' : ''}`}><td className="px-2 py-4"><div className="flex items-center gap-2"><Avatar name={u.username} muted={u.banned} /><div><div className={`text-sm font-medium leading-none ${u.banned ? 'text-[#ba1a1a]' : 'text-[#191b23]'}`}>{u.username || '未命名用户'}</div><div className="mt-1 text-xs text-[#434655]">ID: {u.id.slice(0, 4)}</div></div></div></td><td className="px-2 py-4"><StatusPill user={u} /></td><td className="px-2 py-4">{u.runningTasks}</td><td className="px-2 py-4"><input type="number" defaultValue={u.quotaTotal} onBlur={(e) => { const next = Number(e.target.value); if (next !== u.quotaTotal) void patchUser(u.id, { quotaTotal: next }) }} className="w-16 border-0 border-b border-[#c3c6d7] bg-transparent px-1 py-0.5 text-center text-sm focus:border-[#191b23] focus:ring-0" /></td><td className="px-2 py-4"><ModeSwitch user={u} patchUser={patchUser} /></td><td className="px-2 py-4"><AdminTextButton tone="danger" onClick={() => patchUser(u.id, { banned: !u.banned })}>{u.banned ? '解封' : '封禁'}</AdminTextButton></td></tr>)}
+            {!usersLoading && !usersError && users.map((u) => <tr key={u.id} className={`border-b border-[#e1e2ed] transition-colors hover:bg-[#faf8ff] ${u.banned ? 'bg-[#ffdad6]/20' : ''}`}><td className="px-2 py-4"><div className="flex items-center gap-2"><Avatar name={u.username} muted={u.banned} /><div><div className={`text-sm font-medium leading-none ${u.banned ? 'text-[#ba1a1a]' : 'text-[#191b23]'}`}>{u.username || '未命名用户'}</div><div className="mt-1 text-xs text-[#434655]">ID: {u.id.slice(0, 4)}</div></div></div></td><td className="px-2 py-4"><StatusPill user={u} /></td><td className="px-2 py-4">{u.runningTasks}</td><td className="px-2 py-4"><input name={`quota-${u.id}`} aria-label={`${u.username || '未命名用户'}额度`} type="number" defaultValue={u.quotaTotal} onBlur={(e) => { const next = Number(e.target.value); if (next !== u.quotaTotal) void patchUser(u.id, { quotaTotal: next }) }} className="w-16 border-0 border-b border-[#c3c6d7] bg-transparent px-1 py-0.5 text-center text-sm focus:border-[#191b23] focus:ring-0" /></td><td className="px-2 py-4"><ModeSwitch user={u} patchUser={patchUser} /></td><td className="px-2 py-4"><AdminTextButton tone="danger" onClick={() => patchUser(u.id, { banned: !u.banned })}>{u.banned ? '解封' : '封禁'}</AdminTextButton></td></tr>)}
           </tbody>
         </table>
       </div>
@@ -249,8 +249,8 @@ function AddUserModal({ onClose, onCreated }: { onClose: () => void; onCreated: 
 
   return <form onSubmit={submit}><AdminModal title="添加用户" description="创建一个默认额度为 0 的分发用户。稍后可在用户表格中调整额度和模式。" onClose={onClose} footer={<><AdminButton type="button" variant="secondary" onClick={onClose}>取消</AdminButton><AdminButton disabled={saving} variant="primary">{saving ? '创建中…' : '创建用户'}</AdminButton></>}>
     {notice && <AdminNotice type={notice.type}>{notice.text}</AdminNotice>}
-    <label className="flex flex-col gap-2"><span className="text-xs font-bold uppercase leading-none tracking-wider text-[#191b23]">用户名</span><AdminInput autoFocus placeholder="例如：metropolitan_admin" value={username} onChange={(e) => setUsername(e.target.value)} /></label>
-    <label className="flex flex-col gap-2"><span className="text-xs font-bold uppercase leading-none tracking-wider text-[#191b23]">密码</span><AdminInput placeholder="请输入密码" value={password} onChange={(e) => setPassword(e.target.value)} type="password" /></label>
+    <label className="flex flex-col gap-2"><span className="text-xs font-bold uppercase leading-none tracking-wider text-[#191b23]">用户名</span><AdminInput name="newUsername" autoComplete="username" autoFocus placeholder="例如：metropolitan_admin" value={username} onChange={(e) => setUsername(e.target.value)} /></label>
+    <label className="flex flex-col gap-2"><span className="text-xs font-bold uppercase leading-none tracking-wider text-[#191b23]">密码</span><AdminInput name="newPassword" autoComplete="new-password" placeholder="请输入密码" value={password} onChange={(e) => setPassword(e.target.value)} type="password" /></label>
   </AdminModal></form>
 }
 
@@ -355,8 +355,8 @@ function StorageTab({ buckets, editingBucket, setEditingBucket, formVersion, sav
           <AdminInput name="name" defaultValue={defaults.name} placeholder="名称" />
           <AdminInput name="region" defaultValue={defaults.region} placeholder="地域 Region，例如 ap-nanjing" />
           <AdminInput name="bucket" defaultValue={defaults.bucket} placeholder="Bucket，例如 gptimage-1325670071" />
-          <AdminInput name="secretId" defaultValue={defaults.secretId} placeholder="SecretId" />
-          <AdminInput name="secretKey" defaultValue={defaults.secretKey} placeholder="SecretKey" type="password" />
+          <AdminInput name="secretId" autoComplete="username" defaultValue={defaults.secretId} placeholder="SecretId" />
+          <AdminInput name="secretKey" autoComplete="current-password" defaultValue={defaults.secretKey} placeholder="SecretKey" type="password" />
           <AdminInput name="pathPrefix" defaultValue={defaults.pathPrefix} placeholder="路径前缀 images" />
           <AdminInput name="tempUrlMinutes" defaultValue={defaults.tempUrlMinutes} placeholder="临时链接分钟数，可填 60*24" inputMode="decimal" onBlur={(e) => normalizeMinuteInput(e.currentTarget)} onKeyDown={(e) => { if (e.key === 'Enter') normalizeMinuteInput(e.currentTarget) }} />
           <AdminButton variant="primary" className="mt-2">{editingBucket ? '保存修改' : '添加存储桶'}</AdminButton>
