@@ -108,28 +108,28 @@ export default function SettingsModal() {
               <label className="block md:col-span-2">
                 <span className="text-xs text-gray-500">上游 API URL</span>
                 <div className="mt-1 flex gap-2">
-                  <AdminInput value={adminSettings.baseUrl} onChange={(e) => setAdminSettings({ ...adminSettings, baseUrl: e.target.value })} className="min-w-0 flex-1" />
+                  <AdminInput name="upstreamBaseUrl" value={adminSettings.baseUrl} onChange={(e) => setAdminSettings({ ...adminSettings, baseUrl: e.target.value })} className="min-w-0 flex-1" />
                   <AdminButton type="button" size="sm" variant="secondary" disabled={testing !== null} onClick={() => testAdminSetting('url')}>{testing === 'url' ? '测试中…' : '测试'}</AdminButton>
                 </div>
               </label>
               <label className="block md:col-span-2">
                 <span className="text-xs text-gray-500">上游 API Key</span>
                 <div className="mt-1 flex gap-2">
-                  <AdminInput type="password" value={adminSettings.apiKey} onChange={(e) => setAdminSettings({ ...adminSettings, apiKey: e.target.value })} className="min-w-0 flex-1" />
+                  <AdminInput name="upstreamApiKey" autoComplete="current-password" type="password" value={adminSettings.apiKey} onChange={(e) => setAdminSettings({ ...adminSettings, apiKey: e.target.value })} className="min-w-0 flex-1" />
                   <AdminButton type="button" size="sm" variant="secondary" disabled={testing !== null} onClick={() => testAdminSetting('key')}>{testing === 'key' ? '验证中…' : '验证'}</AdminButton>
                 </div>
               </label>
               <label className="block">
                 <span className="text-xs text-gray-500">模型</span>
-                <AdminInput value={adminSettings.model} onChange={(e) => setAdminSettings({ ...adminSettings, model: e.target.value })} className="mt-1" />
+                <AdminInput name="upstreamModel" value={adminSettings.model} onChange={(e) => setAdminSettings({ ...adminSettings, model: e.target.value })} className="mt-1" />
               </label>
               <label className="block">
                 <span className="text-xs text-gray-500">超时秒数</span>
-                <AdminInput type="number" value={adminSettings.timeout} onChange={(e) => setAdminSettings({ ...adminSettings, timeout: Number(e.target.value) })} className="mt-1" />
+                <AdminInput name="upstreamTimeout" type="number" value={adminSettings.timeout} onChange={(e) => setAdminSettings({ ...adminSettings, timeout: Number(e.target.value) })} className="mt-1" />
               </label>
               <label className="block">
                 <span className="text-xs text-gray-500">接口模式</span>
-                <AdminSelect value={adminSettings.apiMode} onChange={(e) => setAdminSettings({ ...adminSettings, apiMode: e.target.value })} className="mt-1">
+                <AdminSelect name="upstreamApiMode" value={adminSettings.apiMode} onChange={(e) => setAdminSettings({ ...adminSettings, apiMode: e.target.value })} className="mt-1">
                   <option value="images">Images API</option>
                   <option value="responses">Responses API</option>
                 </AdminSelect>
