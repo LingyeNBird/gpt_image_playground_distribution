@@ -12,9 +12,7 @@ export interface BackendGenerateOptions {
 }
 
 export interface BackendTaskImage {
-  dataUrl?: string
-  url?: string
-  objectKey?: string
+  id?: string
 }
 
 export interface BackendTask {
@@ -133,8 +131,12 @@ export async function fetchBackendTasks(): Promise<BackendTask[]> {
   return payload.tasks ?? []
 }
 
+export function backendTaskImageUrl(id: string): string {
+  return `/api/task-images/${encodeURIComponent(id)}`
+}
+
 export function backendTaskToResult(task: BackendTask): CallApiResult {
-  const images = (task.images ?? []).map((image) => image.dataUrl || image.url || '').filter(Boolean)
+  const images = (task.images ?? []).map((image) => image.id || '').filter(Boolean)
   return {
     images,
     actualParams: task.actualParams,

@@ -23,7 +23,7 @@ import {
   storeImage,
   hashDataUrl,
 } from './lib/db'
-import { backendTaskToResult, fetchBackendTask, fetchBackendTasks, getCurrentUser, submitBackendTask } from './lib/backend'
+import { backendTaskImageUrl, backendTaskToResult, fetchBackendTask, fetchBackendTasks, getCurrentUser, submitBackendTask } from './lib/backend'
 import { validateMaskMatchesImage } from './lib/canvasImage'
 import { orderInputImagesForMask } from './lib/mask'
 import { normalizeImageSize } from './lib/size'
@@ -38,22 +38,51 @@ export function getCachedImage(id: string): string | undefined {
   return imageCache.get(id)
 }
 
+async function cacheRemoteImage(id: string, sourceUrl: string): Promise<string | undefined> {
+  try {
+    const response = await fetch(sourceUrl, {
+      credentials: 'include',
+      cache: 'force-cache',
+    })
+    if (!response.ok) return undefined
+    const blob = await response.blob()
+    const dataUrl = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader()
+      reader.onload = () => resolve(typeof reader.result === 'string' ? reader.result : '')
+      reader.onerror = () => reject(reader.error)
+      reader.readAsDataURL(blob)
+    })
+    if (!dataUrl) return undefined
+    await putImage({ id, dataUrl, createdAt: Date.now(), source: 'generated' })
+    imageCache.set(id, dataUrl)
+    return dataUrl
+  } catch {
+    return undefined
+  }
+}
+
 export async function ensureImageCached(id: string): Promise<string | undefined> {
   if (imageCache.has(id)) return imageCache.get(id)
-  if (id.startsWith('url-')) {
-    const task = useStore.getState().tasks.find((t) => t.outputImageUrls?.[id])
-    const url = task?.outputImageUrls?.[id]
-    if (url) {
-      imageCache.set(id, url)
-      return url
-    }
-  }
+  const task = useStore.getState().tasks.find((t) => t.outputImageUrls?.[id])
+  const url = task?.outputImageUrls?.[id]
   const rec = await getImage(id)
   if (rec) {
     imageCache.set(id, rec.dataUrl)
     return rec.dataUrl
   }
-  return undefined
+
+  if (url) {
+    const cached = await cacheRemoteImage(id, url)
+    if (cached) return cached
+    imageCache.set(id, url)
+    return url
+  }
+
+  const imageUrl = backendTaskImageUrl(id)
+  const cached = await cacheRemoteImage(id, imageUrl)
+  if (cached) return cached
+  imageCache.set(id, imageUrl)
+  return imageUrl
 }
 
 function orderImagesWithMaskFirst(images: InputImage[], maskTargetImageId: string | null | undefined) {
@@ -149,18 +178,11 @@ async function syncBackendTasksToLocal(user: CurrentUser): Promise<void> {
     const outputImages: string[] = []
     const outputImageUrls: Record<string, string> = {}
 
-    for (const image of result.images) {
-      if (/^https?:\/\//i.test(image)) {
-        const imgId = `url-${await hashDataUrl(image)}`
-        imageCache.set(imgId, image)
-        outputImages.push(imgId)
-        outputImageUrls[imgId] = image
-        continue
-      }
-
-      const imgId = await storeImage(image, 'generated')
-      imageCache.set(imgId, image)
-      outputImages.push(imgId)
+    for (const imageId of result.images) {
+      const imageUrl = backendTaskImageUrl(imageId)
+      imageCache.set(imageId, imageUrl)
+      outputImages.push(imageId)
+      outputImageUrls[imageId] = imageUrl
     }
 
     const actualParamsByImage = result.actualParamsList?.reduce<Record<string, Partial<TaskParams>>>((acc, params, index) => {
@@ -211,17 +233,11 @@ async function pollBackendTaskUntilSettled(taskId: string): Promise<void> {
   const result = backendTaskToResult(latestBackendTask)
   const outputIds: string[] = []
   const outputImageUrls: Record<string, string> = {}
-  for (const dataUrl of result.images) {
-    let imgId: string
-    if (/^https?:\/\//i.test(dataUrl)) {
-      imgId = `url-${await hashDataUrl(dataUrl)}`
-      imageCache.set(imgId, dataUrl)
-      outputImageUrls[imgId] = dataUrl
-    } else {
-      imgId = await storeImage(dataUrl, 'generated')
-      imageCache.set(imgId, dataUrl)
-    }
-    outputIds.push(imgId)
+  for (const imageId of result.images) {
+    const imageUrl = backendTaskImageUrl(imageId)
+    imageCache.set(imageId, imageUrl)
+    outputImageUrls[imageId] = imageUrl
+    outputIds.push(imageId)
   }
 
   const actualParamsByImage = result.actualParamsList?.reduce<Record<string, Partial<TaskParams>>>((acc, params, index) => {
@@ -704,20 +720,14 @@ async function executeTask(taskId: string) {
 
     const result = backendTaskToResult(latestBackendTask)
 
-    // 存储输出图片
+    // 更新输出图片 id，并通过独立接口按需加载图像数据
     const outputIds: string[] = []
     const outputImageUrls: Record<string, string> = {}
-    for (const dataUrl of result.images) {
-      let imgId: string
-      if (/^https?:\/\//i.test(dataUrl)) {
-        imgId = `url-${await hashDataUrl(dataUrl)}`
-        imageCache.set(imgId, dataUrl)
-        outputImageUrls[imgId] = dataUrl
-      } else {
-        imgId = await storeImage(dataUrl, 'generated')
-        imageCache.set(imgId, dataUrl)
-      }
-      outputIds.push(imgId)
+    for (const imageId of result.images) {
+      const imageUrl = backendTaskImageUrl(imageId)
+      imageCache.set(imageId, imageUrl)
+      outputImageUrls[imageId] = imageUrl
+      outputIds.push(imageId)
     }
     const actualParamsByImage = result.actualParamsList?.reduce<Record<string, Partial<TaskParams>>>((acc, params, index) => {
       const imgId = outputIds[index]

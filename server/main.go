@@ -134,6 +134,7 @@ type TaskTiming struct {
 }
 
 type GeneratedImage struct {
+	ID        string `json:"id,omitempty"`
 	DataURL   string `json:"dataUrl,omitempty"`
 	URL       string `json:"url,omitempty"`
 	ObjectKey string `json:"objectKey,omitempty"`
@@ -222,6 +223,7 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/generate", s.requireUser(s.handleGenerate))
 	mux.HandleFunc("/api/tasks", s.requireUser(s.handleTasks))
 	mux.HandleFunc("/api/tasks/", s.requireUser(s.handleTaskByID))
+	mux.HandleFunc("/api/task-images/", s.requireUser(s.handleTaskImageByID))
 	mux.HandleFunc("/api/admin/settings", s.requireAdmin(s.handleAdminSettings))
 	mux.HandleFunc("/api/admin/settings/test-url", s.requireAdmin(s.handleAdminSettingsTestURL))
 	mux.HandleFunc("/api/admin/settings/verify-key", s.requireAdmin(s.handleAdminSettingsVerifyKey))
@@ -961,11 +963,88 @@ func (s *Server) handleAdminTasks(w http.ResponseWriter, r *http.Request, sess *
 	state := s.store.snapshot()
 	tasks := make([]*GenerationTask, 0, len(state.Tasks))
 	for _, task := range state.Tasks {
-		copy := *task
-		tasks = append(tasks, &copy)
+		tasks = append(tasks, sanitizeTaskForAdmin(task))
 	}
 	sort.Slice(tasks, func(i, j int) bool { return tasks[i].CreatedAt > tasks[j].CreatedAt })
 	writeJSON(w, map[string]any{"tasks": tasks})
+}
+
+func (s *Server) handleTaskImageByID(w http.ResponseWriter, r *http.Request, sess *Session) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	id := strings.TrimPrefix(r.URL.Path, "/api/task-images/")
+	if id == "" {
+		http.NotFound(w, r)
+		return
+	}
+	state := s.store.snapshot()
+	var found *GeneratedImage
+	for _, task := range state.Tasks {
+		if sess.Role != "admin" && task.UserID != sess.UserID {
+			continue
+		}
+		for i := range task.Images {
+			if taskImageID(task.ID, i, task.Images[i]) == id {
+				image := task.Images[i]
+				image.ID = id
+				found = &image
+				break
+			}
+		}
+		if found != nil {
+			break
+		}
+	}
+	if found == nil {
+		http.NotFound(w, r)
+		return
+	}
+	if found.DataURL != "" {
+		mimeType, raw, err := parseDataURL(found.DataURL)
+		if err != nil {
+			httpError(w, 500, err.Error())
+			return
+		}
+		w.Header().Set("Content-Type", mimeType)
+		w.Header().Set("Cache-Control", "private, no-store")
+		_, _ = w.Write(raw)
+		return
+	}
+	imageURL := strings.TrimSpace(found.URL)
+	if found.ObjectKey != "" {
+		bucket := firstBucket(state.Buckets)
+		if bucket == nil {
+			httpError(w, 500, "管理员尚未配置存储桶")
+			return
+		}
+		presigned, err := s.getCOSObjectURL(bucket, found.ObjectKey)
+		if err != nil {
+			httpError(w, 500, err.Error())
+			return
+		}
+		imageURL = presigned
+	}
+	if imageURL == "" {
+		http.NotFound(w, r)
+		return
+	}
+	resp, err := (&http.Client{Timeout: 2 * time.Minute}).Get(imageURL)
+	if err != nil {
+		httpError(w, 502, err.Error())
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		httpError(w, 502, fmt.Sprintf("图片加载失败：HTTP %d", resp.StatusCode))
+		return
+	}
+	w.Header().Set("Cache-Control", "private, no-store")
+	if contentType := strings.TrimSpace(resp.Header.Get("Content-Type")); contentType != "" {
+		w.Header().Set("Content-Type", contentType)
+	}
+	_, _ = io.Copy(w, resp.Body)
 }
 
 func (s *Server) executeGeneration(taskID string, settings AdminSettings, inputImages []string, maskDataURL string) {
@@ -1015,11 +1094,11 @@ func (s *Server) executeGeneration(taskID string, settings AdminSettings, inputI
 				return
 			}
 			timings = append(timings, TaskTiming{Key: fmt.Sprintf("bucket_upload_%d", i+1), Label: fmt.Sprintf("上传存储桶 #%d", i+1), Duration: nowMs() - uploadStarted, Detail: key})
-			generated = append(generated, GeneratedImage{URL: url, ObjectKey: key})
+			generated = append(generated, GeneratedImage{ID: generatedImageID(taskID, i), URL: url, ObjectKey: key})
 		}
 	} else {
-		for _, dataURL := range images {
-			generated = append(generated, GeneratedImage{DataURL: dataURL})
+		for i, dataURL := range images {
+			generated = append(generated, GeneratedImage{ID: generatedImageID(taskID, i), DataURL: dataURL})
 		}
 	}
 	_ = s.store.with(func(st *AppState) error {
@@ -1280,15 +1359,32 @@ func (s *Server) uploadToCOS(b *BucketConfig, taskID string, idx int, dataURL st
 	if err != nil {
 		return "", "", err
 	}
-	expire := time.Duration(b.TempURLMinutes) * time.Minute
-	if expire <= 0 {
-		expire = time.Hour
-	}
-	presigned, err := client.Object.GetPresignedURL(contextTODO(), http.MethodGet, key, b.SecretID, b.SecretKey, expire, nil)
+	presigned, err := client.Object.GetPresignedURL(contextTODO(), http.MethodGet, key, b.SecretID, b.SecretKey, bucketURLExpiry(b), nil)
 	if err != nil {
 		return "", "", err
 	}
 	return presigned.String(), key, nil
+}
+
+func (s *Server) getCOSObjectURL(b *BucketConfig, key string) (string, error) {
+	u, err := url.Parse(cosBucketURL(b))
+	if err != nil {
+		return "", err
+	}
+	client := cos.NewClient(&cos.BaseURL{BucketURL: u}, &http.Client{Transport: &cos.AuthorizationTransport{SecretID: b.SecretID, SecretKey: b.SecretKey}})
+	presigned, err := client.Object.GetPresignedURL(contextTODO(), http.MethodGet, key, b.SecretID, b.SecretKey, bucketURLExpiry(b), nil)
+	if err != nil {
+		return "", err
+	}
+	return presigned.String(), nil
+}
+
+func bucketURLExpiry(b *BucketConfig) time.Duration {
+	expire := time.Duration(b.TempURLMinutes) * time.Minute
+	if expire <= 0 {
+		return time.Hour
+	}
+	return expire
 }
 
 func contextTODO() context.Context { return context.Background() }
@@ -1564,10 +1660,39 @@ func (s *Server) adminUser(id string) (publicUser, bool) {
 
 func sanitizeTaskForUser(t *GenerationTask) *GenerationTask {
 	cp := *t
+	cp.Images = sanitizedImageRefs(t.ID, t.Images)
 	if cp.Status == "error" {
 		cp.Error = sanitizeError(cp.Error, "")
 	}
 	return &cp
+}
+
+func sanitizeTaskForAdmin(t *GenerationTask) *GenerationTask {
+	cp := *t
+	cp.Images = sanitizedImageRefs(t.ID, t.Images)
+	return &cp
+}
+
+func sanitizedImageRefs(taskID string, images []GeneratedImage) []GeneratedImage {
+	if len(images) == 0 {
+		return nil
+	}
+	refs := make([]GeneratedImage, 0, len(images))
+	for i, image := range images {
+		refs = append(refs, GeneratedImage{ID: taskImageID(taskID, i, image)})
+	}
+	return refs
+}
+
+func generatedImageID(taskID string, idx int) string {
+	return fmt.Sprintf("%s-%d", taskID, idx+1)
+}
+
+func taskImageID(taskID string, idx int, image GeneratedImage) string {
+	if image.ID != "" {
+		return image.ID
+	}
+	return generatedImageID(taskID, idx)
 }
 
 func sanitizeError(msg, baseURL string) string {
