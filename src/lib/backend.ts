@@ -1,6 +1,8 @@
 import type { AppSettings, CurrentUser, TaskParams } from '../types'
 import type { CallApiResult } from './api'
 
+export const AUTH_INVALIDATED_EVENT = 'gip:auth-invalidated'
+
 export interface BackendGenerateOptions {
   settings: AppSettings
   prompt: string
@@ -41,8 +43,25 @@ async function readError(response: Response): Promise<string> {
   return `HTTP ${response.status}`
 }
 
+function withApiCacheBuster(path: string, method?: string): string {
+  if ((method ?? 'GET').toUpperCase() !== 'GET' || !path.startsWith('/api/')) return path
+
+  const separator = path.includes('?') ? '&' : '?'
+  return `${path}${separator}_=${Date.now()}`
+}
+
+export function isAuthError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error)
+  return message === '请先登录' || message === '需要管理员登录' || message === '登录已失效'
+}
+
+function notifyAuthInvalidated(message: string) {
+  if (typeof window === 'undefined' || !isAuthError(message)) return
+  window.dispatchEvent(new CustomEvent(AUTH_INVALIDATED_EVENT, { detail: { message } }))
+}
+
 export async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(path, {
+  const response = await fetch(withApiCacheBuster(path, init?.method), {
     credentials: 'include',
     cache: 'no-store',
     ...init,
@@ -51,7 +70,11 @@ export async function apiRequest<T>(path: string, init?: RequestInit): Promise<T
       ...(init?.headers ?? {}),
     },
   })
-  if (!response.ok) throw new Error(await readError(response))
+  if (!response.ok) {
+    const message = await readError(response)
+    notifyAuthInvalidated(message)
+    throw new Error(message)
+  }
   return response.json() as Promise<T>
 }
 
@@ -103,6 +126,11 @@ export async function submitBackendTask(opts: BackendGenerateOptions): Promise<B
 
 export async function fetchBackendTask(id: string): Promise<BackendTask> {
   return apiRequest<BackendTask>(`/api/tasks/${encodeURIComponent(id)}`)
+}
+
+export async function fetchBackendTasks(): Promise<BackendTask[]> {
+  const payload = await apiRequest<{ tasks?: BackendTask[] }>('/api/tasks')
+  return payload.tasks ?? []
 }
 
 export function backendTaskToResult(task: BackendTask): CallApiResult {

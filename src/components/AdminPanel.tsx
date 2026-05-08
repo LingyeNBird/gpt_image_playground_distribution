@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
-import { apiRequest } from '../lib/backend'
+import { apiRequest, isAuthError } from '../lib/backend'
 import { AdminButton, AdminCard, AdminInput, AdminModal, AdminNotice, AdminTabButton, AdminTag, AdminTextButton, AdminToast, MaterialIcon } from './adminUi'
 import { bucketConfirmCopy, bucketEditDefaults, bucketPayloadFromFields, normalizeMinuteInput, toastTypeForError } from './bucketForm'
 
@@ -8,6 +8,8 @@ type AdminUser = { id: string; username: string; disabled: boolean; banned: bool
 type Bucket = { id: string; name: string; region: string; bucket: string; secretId: string; secretKey: string; pathPrefix: string; tempUrlMinutes: number; imageCount: number }
 type Failure = { id: string; username: string; prompt: string; error: string; createdAt: number }
 type AuditEntry = { id: string; type: string; title: string; detail: string; userId?: string; username?: string; createdAt: number }
+type TaskTiming = { key: string; label: string; duration: number; detail?: string }
+type AdminTaskRecord = { id: string; userId: string; username: string; prompt: string; params: Record<string, unknown>; mode: 'direct' | 'bucket'; endpoint?: string; status: 'running' | 'done' | 'error'; error?: string; timings?: TaskTiming[]; createdAt: number; finishedAt?: number; elapsed?: number }
 type AuditPage = { audit: AuditEntry[]; total: number; offset: number; limit: number; hasMore: boolean }
 type UpdateInfo = { currentVersion: string; latestVersion: string; updateAvailable: boolean; assetName?: string }
 type UpdateCheck = { backend: UpdateInfo; frontend: UpdateInfo }
@@ -17,10 +19,12 @@ type PendingBucketSave = { payload: ReturnType<typeof bucketPayloadFromFields>; 
 const auditPageSize = 30
 
 export default function AdminPanel() {
-  const [tab, setTab] = useState<'users' | 'storage' | 'updates'>('users')
+  const [tab, setTab] = useState<'users' | 'records' | 'storage' | 'updates'>('users')
   const [users, setUsers] = useState<AdminUser[]>([])
   const [buckets, setBuckets] = useState<Bucket[]>([])
   const [failures, setFailures] = useState<Failure[]>([])
+  const [records, setRecords] = useState<AdminTaskRecord[]>([])
+  const [selectedRecord, setSelectedRecord] = useState<AdminTaskRecord | null>(null)
   const [audit, setAudit] = useState<AuditEntry[]>([])
   const [auditHasMore, setAuditHasMore] = useState(false)
   const [auditLoading, setAuditLoading] = useState(false)
@@ -61,6 +65,9 @@ export default function AdminPanel() {
       const payload = await apiRequest<{ users: AdminUser[] }>('/api/admin/users')
       setUsers(payload.users ?? [])
     } catch (err) {
+      if (isAuthError(err)) {
+        return
+      }
       setUsersError(err instanceof Error ? err.message : String(err))
     } finally {
       setUsersLoading(false)
@@ -70,6 +77,7 @@ export default function AdminPanel() {
   const load = async () => {
     await Promise.all([
       loadUsers(),
+      apiRequest<{ tasks: AdminTaskRecord[] }>('/api/admin/tasks').then((payload) => setRecords(payload.tasks ?? [])).catch(() => setRecords([])),
       apiRequest<{ buckets: Bucket[] }>('/api/admin/buckets').then((b) => setBuckets(b.buckets ?? [])).catch(() => setBuckets([])),
       apiRequest<{ failures: Failure[] }>('/api/admin/failures').then((f) => setFailures(f.failures ?? [])).catch(() => setFailures([])),
       refreshAudit().catch(() => { setAudit([]); setAuditHasMore(false) }),
@@ -157,9 +165,9 @@ export default function AdminPanel() {
       </div>
 
       <div className="mb-10 flex gap-1 border-b border-[#c3c6d7]">
-        {(['users','storage','updates'] as const).map((item) => (
+        {(['users','records','storage','updates'] as const).map((item) => (
           <AdminTabButton key={item} active={tab === item} onClick={() => setTab(item)}>
-            {item === 'users' ? '用户' : item === 'storage' ? '存储' : '更新'}
+            {item === 'users' ? '用户' : item === 'records' ? '记录' : item === 'storage' ? '存储' : '更新'}
           </AdminTabButton>
         ))}
       </div>
@@ -174,13 +182,57 @@ export default function AdminPanel() {
       {toast && <AdminToast key={toast.id} type={toast.type} text={toast.text} onClose={() => setToast(null)} />}
 
         {tab === 'users' && <UsersTab users={users} audit={audit} failures={failures} usersLoading={usersLoading} usersError={usersError} auditLoading={auditLoading} auditHasMore={auditHasMore} patchUser={patchUser} reload={loadUsers} setUsers={setUsers} refreshAudit={refreshAudit} loadOlderAudit={() => loadAuditPage(audit.length)} />}
+      {tab === 'records' && <RecordsTab records={records} onSelect={setSelectedRecord} />}
       {tab === 'storage' && <StorageTab buckets={buckets} editingBucket={editingBucket} setEditingBucket={setEditingBucket} formVersion={storageFormVersion} saveBucket={saveBucket} deleteBucket={deleteBucket} />}
       {tab === 'updates' && <UpdatesTab setGlobalMessage={(msg) => showToast(msg)} />}
       </main>
       {pendingBucketSave && <BucketConfirmModal action="add" bucketName={pendingBucketSave.payload.name || pendingBucketSave.payload.bucket} onCancel={() => setPendingBucketSave(null)} onConfirm={() => void executeBucketSave(pendingBucketSave)} />}
       {pendingBucketDelete && <BucketConfirmModal action="delete" bucketName={pendingBucketDelete.name} onCancel={() => setPendingBucketDelete(null)} onConfirm={() => void executeBucketDelete(pendingBucketDelete)} />}
+      {selectedRecord && <TaskRecordModal record={selectedRecord} onClose={() => setSelectedRecord(null)} />}
     </div>
   )
+}
+
+function RecordsTab({ records, onSelect }: { records: AdminTaskRecord[]; onSelect: (record: AdminTaskRecord) => void }) {
+  return <AdminCard>
+    <div className="border-b border-[#c3c6d7] p-6">
+      <h3 className="text-lg font-semibold leading-[1.4] text-[#191b23]">生图记录</h3>
+      <p className="mt-2 text-sm leading-[1.6] text-[#434655]">查看用户、端点、分发模式与各阶段耗时。</p>
+    </div>
+    <div className="overflow-x-auto p-6">
+      <table className="w-full min-w-[1100px] border-collapse text-left text-sm">
+        <thead><tr className="border-b border-[#c3c6d7] text-xs font-normal uppercase leading-none tracking-wider text-[#434655]"><th className="px-2 py-2 font-normal">用户</th><th className="px-2 py-2 font-normal">状态</th><th className="px-2 py-2 font-normal">端点</th><th className="px-2 py-2 font-normal">模式</th><th className="px-2 py-2 font-normal">总耗时</th><th className="px-2 py-2 font-normal">用时细节</th><th className="px-2 py-2 font-normal">时间</th><th className="px-2 py-2 font-normal">操作</th></tr></thead>
+        <tbody className="text-sm leading-[1.5] text-[#191b23]">
+          {records.length === 0 && <tr><td colSpan={8} className="px-2 py-8 text-center text-[#434655]">暂无生图记录。</td></tr>}
+          {records.map((record) => <tr key={record.id} className="border-b border-[#e1e2ed] transition-colors hover:bg-[#faf8ff]"><td className="px-2 py-4"><div className="font-medium">{record.username}</div><div className="mt-1 text-xs text-[#434655]">ID: {record.userId.slice(0, 4)}</div></td><td className="px-2 py-4"><AdminTag tone={record.status === 'done' ? 'success' : record.status === 'error' ? 'danger' : 'info'}>{record.status === 'done' ? '完成' : record.status === 'error' ? '失败' : '进行中'}</AdminTag></td><td className="px-2 py-4"><div className="max-w-[260px] break-all font-mono text-xs text-[#434655]">{record.endpoint || '-'}</div></td><td className="px-2 py-4">{record.mode === 'bucket' ? '存储桶' : '直传'}</td><td className="px-2 py-4">{formatDuration(record.elapsed)}</td><td className="px-2 py-4"><div className="max-w-[320px] text-xs text-[#434655]">{summarizeTimings(record.timings)}</div></td><td className="px-2 py-4 text-xs text-[#434655]">{new Date(record.createdAt).toLocaleString()}</td><td className="px-2 py-4"><AdminTextButton onClick={() => onSelect(record)}>查看详情</AdminTextButton></td></tr>)}
+        </tbody>
+      </table>
+    </div>
+  </AdminCard>
+}
+
+function TaskRecordModal({ record, onClose }: { record: AdminTaskRecord; onClose: () => void }) {
+  return <AdminModal title="生图记录详情" description={`用户 ${record.username} · ${record.mode === 'bucket' ? '存储桶' : '直传'} · ${record.status === 'done' ? '完成' : record.status === 'error' ? '失败' : '进行中'}`} onClose={onClose} maxWidth="max-w-[760px]" footer={<AdminButton type="button" variant="secondary" onClick={onClose}>关闭</AdminButton>}>
+    <div className="grid gap-4">
+      <div><div className="text-xs font-bold uppercase tracking-wider text-[#434655]">提示词</div><div className="mt-2 whitespace-pre-wrap rounded-lg bg-[#faf8ff] p-3 text-sm text-[#191b23]">{record.prompt || '-'}</div></div>
+      <div className="grid gap-4 md:grid-cols-2">
+        <div><div className="text-xs font-bold uppercase tracking-wider text-[#434655]">端点</div><div className="mt-2 break-all rounded-lg bg-[#faf8ff] p-3 font-mono text-xs text-[#191b23]">{record.endpoint || '-'}</div></div>
+        <div><div className="text-xs font-bold uppercase tracking-wider text-[#434655]">参数</div><pre className="mt-2 overflow-x-auto rounded-lg bg-[#faf8ff] p-3 text-xs text-[#191b23]">{JSON.stringify(record.params ?? {}, null, 2)}</pre></div>
+      </div>
+      <div><div className="text-xs font-bold uppercase tracking-wider text-[#434655]">用时细节</div><div className="mt-2 overflow-x-auto"><table className="w-full border-collapse text-left text-sm"><thead><tr className="border-b border-[#c3c6d7] text-xs uppercase tracking-wider text-[#434655]"><th className="px-2 py-2 font-normal">阶段</th><th className="px-2 py-2 font-normal">耗时</th><th className="px-2 py-2 font-normal">说明</th></tr></thead><tbody>{(record.timings ?? []).length === 0 && <tr><td colSpan={3} className="px-2 py-4 text-[#434655]">暂无耗时记录</td></tr>}{(record.timings ?? []).map((timing) => <tr key={timing.key} className="border-b border-[#e1e2ed]"><td className="px-2 py-3">{timing.label}</td><td className="px-2 py-3">{formatDuration(timing.duration)}</td><td className="px-2 py-3 break-all text-xs text-[#434655]">{timing.detail || '-'}</td></tr>)}</tbody></table></div></div>
+      {record.error && <AdminNotice type="error">{record.error}</AdminNotice>}
+    </div>
+  </AdminModal>
+}
+
+function formatDuration(value?: number) {
+  if (!value || value < 0) return '-'
+  return `${(value / 1000).toFixed(value >= 10000 ? 1 : 2)}s`
+}
+
+function summarizeTimings(timings?: TaskTiming[]) {
+  if (!timings?.length) return '-'
+  return timings.map((timing) => `${timing.label} ${formatDuration(timing.duration)}`).join(' · ')
 }
 
 function StatCard({ label, value, icon }: { label: string; value: number; icon: string }) {

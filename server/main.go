@@ -38,6 +38,7 @@ const (
 	defaultDataDir  = "/data"
 	defaultBindAddr = ":8080"
 	releaseRepo     = "LingyeNBird/gpt_image_playground_distribution"
+	promptRewriteGuardPrefix = "Use the following text as the complete prompt. Do not rewrite it:"
 )
 
 var (
@@ -112,15 +113,24 @@ type GenerationTask struct {
 	Prompt           string           `json:"prompt"`
 	Params           map[string]any   `json:"params"`
 	Mode             string           `json:"mode"`
+	Endpoint         string           `json:"endpoint,omitempty"`
 	Status           string           `json:"status"`
 	Error            string           `json:"error,omitempty"`
 	Images           []GeneratedImage `json:"images,omitempty"`
 	ActualParams     map[string]any   `json:"actualParams,omitempty"`
 	ActualParamsList []map[string]any `json:"actualParamsList,omitempty"`
 	RevisedPrompts   []string         `json:"revisedPrompts,omitempty"`
+	Timings          []TaskTiming     `json:"timings,omitempty"`
 	CreatedAt        int64            `json:"createdAt"`
 	FinishedAt       int64            `json:"finishedAt,omitempty"`
 	Elapsed          int64            `json:"elapsed,omitempty"`
+}
+
+type TaskTiming struct {
+	Key      string `json:"key"`
+	Label    string `json:"label"`
+	Duration int64  `json:"duration"`
+	Detail   string `json:"detail,omitempty"`
 }
 
 type GeneratedImage struct {
@@ -182,6 +192,8 @@ func main() {
 	dataDir := getenv("DATA_DIR", defaultDataDir)
 	staticDir := getenv("STATIC_DIR", "./dist")
 	addr := getenv("ADDR", defaultBindAddr)
+	log.Printf("Starting gpt-image-playground (backend=%s, frontend=%s)", backendVersion, frontendVersion)
+	log.Printf("Data directory: %s (mount to persist across restarts)", dataDir)
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		log.Fatal(err)
 	}
@@ -189,6 +201,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	log.Printf("IMPORTANT: admin key: %s", adminKey)
 	store, err := NewStore(dataDir)
 	if err != nil {
 		log.Fatal(err)
@@ -248,17 +261,22 @@ func (st *Store) load() error {
 	path := filepath.Join(st.dataDir, "state.json")
 	b, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
+		log.Printf("state.json not found at %s, creating with defaults", path)
 		return st.saveLocked()
 	}
 	if err != nil {
+		log.Printf("ERROR: failed to read %s: %v", path, err)
 		return err
 	}
 	if len(bytes.TrimSpace(b)) == 0 {
-		return st.saveLocked()
+		log.Printf("WARNING: %s is empty, keeping in-memory defaults (existing data NOT overwritten)", path)
+		return nil
 	}
 	if err := json.Unmarshal(b, &st.state); err != nil {
+		log.Printf("ERROR: failed to parse %s: %v", path, err)
 		return err
 	}
+	log.Printf("Loaded state from %s (%d bytes)", path, len(b))
 	if st.state.Users == nil {
 		st.state.Users = map[string]*User{}
 	}
@@ -292,14 +310,29 @@ func (st *Store) load() error {
 func (st *Store) saveLocked() error {
 	b, err := json.MarshalIndent(st.state, "", "  ")
 	if err != nil {
+		log.Printf("ERROR: saveLocked marshal failed: %v", err)
 		return err
 	}
-	tmp := filepath.Join(st.dataDir, "state.json.tmp")
 	path := filepath.Join(st.dataDir, "state.json")
+	tmp := path + ".tmp"
+	bak := path + ".bak"
+
 	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+		log.Printf("ERROR: saveLocked write temp failed: %v", err)
 		return err
 	}
-	return os.Rename(tmp, path)
+	if info, err := os.Stat(path); err == nil && info.Size() > 0 {
+		bakData, _ := os.ReadFile(path)
+		if len(bakData) > 0 {
+			_ = os.WriteFile(bak, bakData, 0o600)
+		}
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		log.Printf("ERROR: saveLocked rename failed: %v", err)
+		return err
+	}
+	log.Printf("State saved to %s (%d bytes)", path, len(b))
+	return nil
 }
 
 func (st *Store) with(fn func(*AppState) error) error {
@@ -919,6 +952,21 @@ func (s *Server) handleAdminAudit(w http.ResponseWriter, r *http.Request, sess *
 	writeJSON(w, map[string]any{"audit": audit[offset:end], "total": len(audit), "offset": offset, "limit": limit, "hasMore": end < len(audit)})
 }
 
+func (s *Server) handleAdminTasks(w http.ResponseWriter, r *http.Request, sess *Session) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	state := s.store.snapshot()
+	tasks := make([]*GenerationTask, 0, len(state.Tasks))
+	for _, task := range state.Tasks {
+		copy := *task
+		tasks = append(tasks, &copy)
+	}
+	sort.Slice(tasks, func(i, j int) bool { return tasks[i].CreatedAt > tasks[j].CreatedAt })
+	writeJSON(w, map[string]any{"tasks": tasks})
+}
+
 func (s *Server) executeGeneration(taskID string, settings AdminSettings, inputImages []string, maskDataURL string) {
 	started := nowMs()
 	state := s.store.snapshot()
@@ -926,7 +974,7 @@ func (s *Server) executeGeneration(taskID string, settings AdminSettings, inputI
 	if task == nil {
 		return
 	}
-	images, actual, actualList, revised, err := s.callUpstream(settings, task, inputImages, maskDataURL)
+	images, actual, actualList, revised, endpoint, timings, err := s.callUpstream(settings, task, inputImages, maskDataURL)
 	if err != nil {
 		clean := sanitizeError(err.Error(), settings.BaseURL)
 		_ = s.store.with(func(st *AppState) error {
@@ -934,6 +982,8 @@ func (s *Server) executeGeneration(taskID string, settings AdminSettings, inputI
 			if t == nil {
 				return nil
 			}
+			t.Endpoint = endpoint
+			t.Timings = timings
 			t.Status = "error"
 			t.Error = clean
 			t.FinishedAt = nowMs()
@@ -956,11 +1006,13 @@ func (s *Server) executeGeneration(taskID string, settings AdminSettings, inputI
 			return
 		}
 		for i, dataURL := range images {
+			uploadStarted := nowMs()
 			url, key, upErr := s.uploadToCOS(bucket, taskID, i, dataURL)
 			if upErr != nil {
 				s.executeGenerationFailure(taskID, started, upErr.Error())
 				return
 			}
+			timings = append(timings, TaskTiming{Key: fmt.Sprintf("bucket_upload_%d", i+1), Label: fmt.Sprintf("上传存储桶 #%d", i+1), Duration: nowMs() - uploadStarted, Detail: key})
 			generated = append(generated, GeneratedImage{URL: url, ObjectKey: key})
 		}
 	} else {
@@ -973,6 +1025,8 @@ func (s *Server) executeGeneration(taskID string, settings AdminSettings, inputI
 		if t == nil {
 			return nil
 		}
+		t.Endpoint = endpoint
+		t.Timings = timings
 		t.Status = "done"
 		t.Images = generated
 		t.ActualParams = actual
@@ -1000,26 +1054,117 @@ func (s *Server) executeGenerationFailure(taskID string, started int64, msg stri
 	})
 }
 
-func (s *Server) callUpstream(settings AdminSettings, task *GenerationTask, inputImages []string, maskDataURL string) ([]string, map[string]any, []map[string]any, []string, error) {
+func (s *Server) callUpstream(settings AdminSettings, task *GenerationTask, inputImages []string, maskDataURL string) ([]string, map[string]any, []map[string]any, []string, string, []TaskTiming, error) {
 	if settings.APIMode == "responses" {
-		return nil, nil, nil, nil, errors.New("后端 Responses API 代理暂未实现，请在管理员设置中使用 Images API")
+		return nil, nil, nil, nil, "", nil, errors.New("后端 Responses API 代理暂未实现，请在管理员设置中使用 Images API")
 	}
+	if settings.CodexCLI {
+		n := toInt(task.Params["n"])
+		if n > 1 {
+			return s.callUpstreamCodexCLIConcurrent(settings, task, inputImages, maskDataURL, n)
+		}
+	}
+
+	return s.callUpstreamImages(settings, task, inputImages, maskDataURL)
+}
+
+func (s *Server) callUpstreamCodexCLIConcurrent(settings AdminSettings, task *GenerationTask, inputImages []string, maskDataURL string, n int) ([]string, map[string]any, []map[string]any, []string, string, []TaskTiming, error) {
+	results := make([]struct {
+		images  []string
+		actual  map[string]any
+		revised []string
+		endpoint string
+		timings []TaskTiming
+		err     error
+	}, n)
+
+	for i := 0; i < n; i++ {
+		taskCopy := *task
+		paramsCopy := map[string]any{}
+		for k, v := range task.Params {
+			paramsCopy[k] = v
+		}
+		paramsCopy["n"] = 1
+		taskCopy.Params = paramsCopy
+		images, actual, _, revised, endpoint, timings, err := s.callUpstreamImages(settings, &taskCopy, inputImages, maskDataURL)
+		results[i] = struct {
+			images  []string
+			actual  map[string]any
+			revised []string
+			endpoint string
+			timings []TaskTiming
+			err     error
+		}{images: images, actual: actual, revised: revised, endpoint: endpoint, timings: timings, err: err}
+	}
+
+	images := []string{}
+	actualList := []map[string]any{}
+	revised := []string{}
+	endpoint := ""
+	timings := []TaskTiming{}
+	var mergedActual map[string]any
+	for _, result := range results {
+		if result.err != nil {
+			continue
+		}
+		if endpoint == "" {
+			endpoint = result.endpoint
+		}
+		images = append(images, result.images...)
+		for range result.images {
+			actualList = append(actualList, result.actual)
+		}
+		revised = append(revised, result.revised...)
+		timings = append(timings, result.timings...)
+		if mergedActual == nil && result.actual != nil {
+			mergedActual = map[string]any{}
+			for k, v := range result.actual {
+				mergedActual[k] = v
+			}
+		}
+	}
+
+	if len(images) == 0 {
+		for _, result := range results {
+			if result.err != nil {
+				return nil, nil, nil, nil, endpoint, timings, result.err
+			}
+		}
+		return nil, nil, nil, nil, endpoint, timings, errors.New("所有并发请求均失败")
+	}
+
+	if mergedActual == nil {
+		mergedActual = map[string]any{}
+	}
+	mergedActual["n"] = len(images)
+	return images, mergedActual, actualList, revised, endpoint, timings, nil
+}
+
+func (s *Server) callUpstreamImages(settings AdminSettings, task *GenerationTask, inputImages []string, maskDataURL string) ([]string, map[string]any, []map[string]any, []string, string, []TaskTiming, error) {
 	endpoint, err := upstreamEndpoint(settings.BaseURL, "/images/generations")
 	if err != nil {
-		return nil, nil, nil, nil, err
+		return nil, nil, nil, nil, "", nil, err
 	}
 	var body io.Reader
+	timings := []TaskTiming{}
 	headers := map[string]string{"Authorization": "Bearer " + settings.APIKey, "Cache-Control": "no-store", "Pragma": "no-cache"}
+	prompt := task.Prompt
+	if settings.CodexCLI {
+		prompt = promptRewriteGuardPrefix + "\n" + prompt
+	}
 	if len(inputImages) > 0 {
 		endpoint, err = upstreamEndpoint(settings.BaseURL, "/images/edits")
 		if err != nil {
-			return nil, nil, nil, nil, err
+			return nil, nil, nil, nil, "", nil, err
 		}
 		buf := &bytes.Buffer{}
 		mw := multipart.NewWriter(buf)
 		writeFormField(mw, "model", settings.Model)
-		writeFormField(mw, "prompt", task.Prompt)
+		writeFormField(mw, "prompt", prompt)
 		for k, v := range task.Params {
+			if settings.CodexCLI && k == "quality" {
+				continue
+			}
 			if k != "n" || toInt(v) > 1 {
 				writeFormField(mw, k, fmt.Sprint(v))
 			}
@@ -1034,8 +1179,11 @@ func (s *Server) callUpstream(settings AdminSettings, task *GenerationTask, inpu
 		body = buf
 		headers["Content-Type"] = mw.FormDataContentType()
 	} else {
-		payload := map[string]any{"model": settings.Model, "prompt": task.Prompt}
+		payload := map[string]any{"model": settings.Model, "prompt": prompt}
 		for k, v := range task.Params {
+			if settings.CodexCLI && k == "quality" {
+				continue
+			}
 			if k == "output_compression" && v == nil {
 				continue
 			}
@@ -1050,22 +1198,26 @@ func (s *Server) callUpstream(settings AdminSettings, task *GenerationTask, inpu
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
+	requestStarted := nowMs()
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, nil, nil, nil, err
+		return nil, nil, nil, nil, endpoint, timings, err
 	}
+	timings = append(timings, TaskTiming{Key: "upstream_request", Label: "发送请求到获取响应", Duration: nowMs() - requestStarted, Detail: endpoint})
 	defer resp.Body.Close()
+	readStarted := nowMs()
 	rb, _ := io.ReadAll(resp.Body)
+	timings = append(timings, TaskTiming{Key: "upstream_read_body", Label: "读取响应体", Duration: nowMs() - readStarted})
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, nil, nil, nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(rb))
+		return nil, nil, nil, nil, endpoint, timings, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(rb))
 	}
 	var payload map[string]any
 	if err := json.Unmarshal(rb, &payload); err != nil {
-		return nil, nil, nil, nil, err
+		return nil, nil, nil, nil, endpoint, timings, err
 	}
 	arr, _ := payload["data"].([]any)
 	if len(arr) == 0 {
-		return nil, nil, nil, nil, errors.New("接口未返回图片数据")
+		return nil, nil, nil, nil, endpoint, timings, errors.New("接口未返回图片数据")
 	}
 	mimeType := "image/png"
 	if f, _ := task.Params["output_format"].(string); f != "" {
@@ -1077,17 +1229,20 @@ func (s *Server) callUpstream(settings AdminSettings, task *GenerationTask, inpu
 		m, _ := item.(map[string]any)
 		if b64, _ := m["b64_json"].(string); b64 != "" {
 			images = append(images, "data:"+mimeType+";base64,"+b64)
+			timings = append(timings, TaskTiming{Key: fmt.Sprintf("image_decode_%d", len(images)), Label: fmt.Sprintf("生成图片数据 #%d", len(images)), Duration: 0})
 		} else if u, _ := m["url"].(string); u != "" {
+			downloadStarted := nowMs()
 			du, err := downloadAsDataURL(u, mimeType)
 			if err != nil {
-				return nil, nil, nil, nil, err
+				return nil, nil, nil, nil, endpoint, timings, err
 			}
 			images = append(images, du)
+			timings = append(timings, TaskTiming{Key: fmt.Sprintf("image_fetch_%d", len(images)), Label: fmt.Sprintf("获取图片 #%d", len(images)), Duration: nowMs() - downloadStarted, Detail: u})
 		}
 		rp, _ := m["revised_prompt"].(string)
 		revised = append(revised, rp)
 	}
-	return images, pickActual(payload), nil, revised, nil
+	return images, pickActual(payload), nil, revised, endpoint, timings, nil
 }
 
 func (s *Server) uploadToCOS(b *BucketConfig, taskID string, idx int, dataURL string) (string, string, error) {
@@ -1189,7 +1344,6 @@ func ensureAdminKey(dataDir string) (string, error) {
 		if err := os.WriteFile(adminPath, []byte(enc), 0o600); err != nil {
 			return "", err
 		}
-		log.Printf("IMPORTANT: initial admin key: %s", plain)
 		log.Printf("IMPORTANT: encrypted admin key saved to %s; keep ./data mounted to persist it", adminPath)
 		return plain, nil
 	}

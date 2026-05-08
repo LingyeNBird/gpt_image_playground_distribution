@@ -17,19 +17,19 @@ tasks:
   deps:
     desc: Install frontend dependencies
     cmds:
-      - npm ci
+      - pnpm install --frozen-lockfile
 
   test:
     desc: Run frontend and Go backend tests
     cmds:
-      - npm test
+      - pnpm test
       - cmd: go test ./...
         dir: server
 
   build:frontend:
     desc: Build frontend assets locally
     cmds:
-      - npm run build
+      - pnpm build
 
   build:backend:
     desc: Build Go backend binary locally

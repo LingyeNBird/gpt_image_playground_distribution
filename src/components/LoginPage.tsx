@@ -2,13 +2,24 @@ import { useState } from 'react'
 import { loginAdmin, loginUser, registerUser } from '../lib/backend'
 import { useStore } from '../store'
 
+function navigateTo(path: '/' | '/admin') {
+  if (window.location.pathname === path) return
+  window.history.replaceState(null, '', path)
+  window.dispatchEvent(new PopStateEvent('popstate'))
+}
+
 export default function LoginPage() {
   const setCurrentUser = useStore((s) => s.setCurrentUser)
-  const [tab, setTab] = useState<'login' | 'register' | 'admin'>('login')
+  const [tab, setTab] = useState<'login' | 'register' | 'admin'>(() => window.location.pathname === '/admin' ? 'admin' : 'login')
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [adminKey, setAdminKey] = useState('')
   const [error, setError] = useState('')
+
+  const switchTab = (nextTab: 'login' | 'register' | 'admin') => {
+    setTab(nextTab)
+    navigateTo(nextTab === 'admin' ? '/admin' : '/')
+  }
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -20,6 +31,7 @@ export default function LoginPage() {
           ? await registerUser(username, password)
           : await loginUser(username, password)
       setCurrentUser(user)
+      navigateTo(user.role === 'admin' ? '/admin' : '/')
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
     }
@@ -28,11 +40,11 @@ export default function LoginPage() {
   return (
     <div className="min-h-screen flex items-center justify-center bg-gray-50 dark:bg-gray-950 p-4">
       <form onSubmit={submit} className="w-full max-w-sm rounded-3xl border border-gray-200 dark:border-white/[0.08] bg-white dark:bg-gray-900 p-6 shadow-xl">
-        <h1 className="text-xl font-bold text-gray-900 dark:text-gray-100 mb-1">GPT Image Playground</h1>
+        <h1 className="text-xl font-bold text-gray-900 dark:text-gray-100 mb-1">GPT Image Playground Distribution</h1>
         <p className="text-sm text-gray-500 mb-5">请登录后使用分发服务</p>
         <div className="grid grid-cols-3 gap-2 mb-5 text-sm">
           {(['login','register','admin'] as const).map((item) => (
-            <button key={item} type="button" onClick={() => setTab(item)} className={`rounded-xl px-3 py-2 ${tab === item ? 'bg-blue-500 text-white' : 'bg-gray-100 dark:bg-white/[0.06] text-gray-600 dark:text-gray-300'}`}>
+            <button key={item} type="button" onClick={() => switchTab(item)} className={`rounded-xl px-3 py-2 ${tab === item ? 'bg-blue-500 text-white' : 'bg-gray-100 dark:bg-white/[0.06] text-gray-600 dark:text-gray-300'}`}>
               {item === 'login' ? '登录' : item === 'register' ? '注册' : '管理员'}
             </button>
           ))}

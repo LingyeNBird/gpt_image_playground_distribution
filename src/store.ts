@@ -23,7 +23,7 @@ import {
   storeImage,
   hashDataUrl,
 } from './lib/db'
-import { backendTaskToResult, fetchBackendTask, getCurrentUser, submitBackendTask } from './lib/backend'
+import { backendTaskToResult, fetchBackendTask, fetchBackendTasks, getCurrentUser, submitBackendTask } from './lib/backend'
 import { validateMaskMatchesImage } from './lib/canvasImage'
 import { orderInputImagesForMask } from './lib/mask'
 import { normalizeImageSize } from './lib/size'
@@ -67,7 +67,7 @@ function orderImagesWithMaskFirst(images: InputImage[], maskTargetImageId: strin
 }
 
 function isTaskVisibleToUser(task: TaskRecord, user: CurrentUser | null): boolean {
-  return Boolean(user?.role === 'user' && task.ownerUserId === user.id)
+  return Boolean(user && task.ownerUserId === user.id)
 }
 
 async function loadLocalTasksForUser(user: CurrentUser | null): Promise<void> {
@@ -99,6 +99,132 @@ async function loadLocalTasksForUser(user: CurrentUser | null): Promise<void> {
       await deleteImage(img.id)
     }
   }
+}
+
+function mergeTaskRecord(task: TaskRecord) {
+  const tasks = useStore.getState().tasks
+  const match = tasks.find((item) => item.id === task.id || (task.backendTaskId && item.backendTaskId === task.backendTaskId))
+  if (!match) return { task }
+
+  return {
+    task: {
+      ...match,
+      ...task,
+      isFavorite: task.isFavorite ?? match.isFavorite,
+    },
+    replacedTaskId: match.id !== task.id ? match.id : undefined,
+  }
+}
+
+async function syncBackendTasksToLocal(user: CurrentUser): Promise<void> {
+  const backendTasks = await fetchBackendTasks()
+
+  for (const backendTask of backendTasks) {
+    const result = backendTaskToResult(backendTask)
+    const outputImages: string[] = []
+    const outputImageUrls: Record<string, string> = {}
+
+    for (const image of result.images) {
+      if (/^https?:\/\//i.test(image)) {
+        const imgId = `url-${await hashDataUrl(image)}`
+        imageCache.set(imgId, image)
+        outputImages.push(imgId)
+        outputImageUrls[imgId] = image
+        continue
+      }
+
+      const imgId = await storeImage(image, 'generated')
+      imageCache.set(imgId, image)
+      outputImages.push(imgId)
+    }
+
+    const actualParamsByImage = result.actualParamsList?.reduce<Record<string, Partial<TaskParams>>>((acc, params, index) => {
+      const imgId = outputImages[index]
+      if (imgId && params && Object.keys(params).length > 0) acc[imgId] = params
+      return acc
+    }, {})
+    const revisedPromptByImage = result.revisedPrompts?.reduce<Record<string, string>>((acc, revisedPrompt, index) => {
+      const imgId = outputImages[index]
+      if (imgId && revisedPrompt && revisedPrompt.trim()) acc[imgId] = revisedPrompt
+      return acc
+    }, {})
+
+    const merged = mergeTaskRecord({
+      id: backendTask.id,
+      ownerUserId: user.id,
+      prompt: backendTask.prompt,
+      params: backendTask.params,
+      actualParams: result.actualParams,
+      actualParamsByImage: actualParamsByImage && Object.keys(actualParamsByImage).length > 0 ? actualParamsByImage : undefined,
+      revisedPromptByImage: revisedPromptByImage && Object.keys(revisedPromptByImage).length > 0 ? revisedPromptByImage : undefined,
+      inputImageIds: [],
+      outputImages,
+      outputImageUrls,
+      backendTaskId: backendTask.id,
+      deliveryMode: backendTask.mode,
+      status: backendTask.status,
+      error: backendTask.error ?? null,
+      createdAt: backendTask.createdAt,
+      finishedAt: backendTask.finishedAt ?? null,
+      elapsed: backendTask.elapsed ?? null,
+    })
+    await putTask(merged.task)
+    if (merged.replacedTaskId) {
+      await dbDeleteTask(merged.replacedTaskId)
+    }
+  }
+}
+
+async function pollBackendTaskUntilSettled(taskId: string): Promise<void> {
+  let latestBackendTask = await fetchBackendTask(taskId)
+  while (latestBackendTask.status === 'running') {
+    await new Promise((resolve) => setTimeout(resolve, 1500))
+    latestBackendTask = await fetchBackendTask(taskId)
+  }
+
+  const result = backendTaskToResult(latestBackendTask)
+  const outputIds: string[] = []
+  const outputImageUrls: Record<string, string> = {}
+  for (const dataUrl of result.images) {
+    let imgId: string
+    if (/^https?:\/\//i.test(dataUrl)) {
+      imgId = `url-${await hashDataUrl(dataUrl)}`
+      imageCache.set(imgId, dataUrl)
+      outputImageUrls[imgId] = dataUrl
+    } else {
+      imgId = await storeImage(dataUrl, 'generated')
+      imageCache.set(imgId, dataUrl)
+    }
+    outputIds.push(imgId)
+  }
+
+  const actualParamsByImage = result.actualParamsList?.reduce<Record<string, Partial<TaskParams>>>((acc, params, index) => {
+    const imgId = outputIds[index]
+    if (imgId && params && Object.keys(params).length > 0) acc[imgId] = params
+    return acc
+  }, {})
+  const revisedPromptByImage = result.revisedPrompts?.reduce<Record<string, string>>((acc, revisedPrompt, index) => {
+    const imgId = outputIds[index]
+    if (imgId && revisedPrompt && revisedPrompt.trim()) acc[imgId] = revisedPrompt
+    return acc
+  }, {})
+
+  updateTaskInStore(taskId, {
+    outputImages: outputIds,
+    outputImageUrls,
+    actualParams: { ...result.actualParams, n: outputIds.length },
+    actualParamsByImage: actualParamsByImage && Object.keys(actualParamsByImage).length > 0 ? actualParamsByImage : undefined,
+    revisedPromptByImage: revisedPromptByImage && Object.keys(revisedPromptByImage).length > 0 ? revisedPromptByImage : undefined,
+    status: latestBackendTask.status,
+    error: latestBackendTask.error ?? null,
+    finishedAt: latestBackendTask.finishedAt ?? null,
+    elapsed: latestBackendTask.elapsed ?? null,
+  })
+}
+
+async function resumeRunningTasks(): Promise<void> {
+  const runningTasks = useStore.getState().tasks.filter((task) => task.status === 'running' && task.backendTaskId)
+  await Promise.allSettled(runningTasks.map((task) => pollBackendTaskUntilSettled(task.backendTaskId!)))
 }
 
 // ===== Store 类型 =====
@@ -386,7 +512,14 @@ export async function initStore() {
     useStore.getState().setAuthChecked(true)
   }
 
+  if (currentUser) {
+    await syncBackendTasksToLocal(currentUser)
+  }
+
   await loadLocalTasksForUser(currentUser)
+  if (currentUser) {
+    void resumeRunningTasks()
+  }
 }
 
 /** 提交新任务 */
@@ -476,47 +609,40 @@ export async function submitTask(options: { allowFullMask?: boolean } = {}) {
     elapsed: null,
   }
 
-  const latestTasks = useStore.getState().tasks
-  useStore.getState().setTasks([task, ...latestTasks])
-  await putTask(task)
+  const backendTask = await submitBackendTask({
+    settings,
+    prompt: task.prompt,
+    params: task.params,
+    inputImageDataUrls: orderedInputImages.map((img) => img.dataUrl),
+    maskDataUrl: maskDraft?.maskDataUrl,
+  })
 
-  // 异步调用 API
-  executeTask(taskId)
+  const persistedTask: TaskRecord = {
+    ...task,
+    id: backendTask.id,
+    backendTaskId: backendTask.id,
+    status: backendTask.status,
+    createdAt: backendTask.createdAt,
+  }
+
+  const latestTasks = useStore.getState().tasks
+  useStore.getState().setTasks([persistedTask, ...latestTasks])
+  await putTask(persistedTask)
+
+  // 异步轮询后端任务
+  void executeTask(backendTask.id)
 }
 
 async function executeTask(taskId: string) {
-  const { settings } = useStore.getState()
   const task = useStore.getState().tasks.find((t) => t.id === taskId)
   if (!task) return
 
   try {
-    // 获取输入图片 data URLs
-    const inputDataUrls: string[] = []
-    for (const imgId of task.inputImageIds) {
-      const dataUrl = await ensureImageCached(imgId)
-      if (!dataUrl) throw new Error('输入图片已不存在')
-      inputDataUrls.push(dataUrl)
-    }
-    let maskDataUrl: string | undefined
-    if (task.maskImageId) {
-      maskDataUrl = await ensureImageCached(task.maskImageId)
-      if (!maskDataUrl) throw new Error('遮罩图片已不存在')
-    }
+    const latestBackendTask = await fetchBackendTask(task.backendTaskId ?? task.id)
 
-    const backendTask = await submitBackendTask({
-      settings,
-      prompt: task.prompt,
-      params: task.params,
-      inputImageDataUrls: inputDataUrls,
-      maskDataUrl,
-    })
-
-    updateTaskInStore(taskId, { backendTaskId: backendTask.id })
-
-    let latestBackendTask = backendTask
-    while (latestBackendTask.status === 'running') {
-      await new Promise((resolve) => setTimeout(resolve, 1500))
-      latestBackendTask = await fetchBackendTask(backendTask.id)
+    if (latestBackendTask.status === 'running') {
+      await pollBackendTaskUntilSettled(latestBackendTask.id)
+      return
     }
 
     if (latestBackendTask.status === 'error') {
@@ -554,6 +680,7 @@ async function executeTask(taskId: string) {
       (revisedPrompt) => revisedPrompt?.trim() && revisedPrompt.trim() !== task.prompt.trim(),
     )
     const hasRevisedPromptValue = result.revisedPrompts?.some((revisedPrompt) => revisedPrompt?.trim())
+    const settings = useStore.getState().settings
     if (!settings.codexCli) {
       if (promptWasRevised) {
         showCodexCliPrompt()
@@ -575,15 +702,6 @@ async function executeTask(taskId: string) {
     })
 
     useStore.getState().showToast(`生成完成，共 ${outputIds.length} 张图片`, 'success')
-    const currentMask = useStore.getState().maskDraft
-    if (
-      maskDataUrl &&
-      currentMask &&
-      currentMask.targetImageId === task.maskTargetImageId &&
-      currentMask.maskDataUrl === maskDataUrl
-    ) {
-      useStore.getState().clearMaskDraft()
-    }
   } catch (err) {
     updateTaskInStore(taskId, {
       status: 'error',

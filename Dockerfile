@@ -1,10 +1,11 @@
 # ---- Frontend build ----
 FROM node:20-alpine AS frontend
 WORKDIR /app
-COPY package.json package-lock.json ./
-RUN npm ci
+RUN corepack enable
+COPY package.json pnpm-lock.yaml ./
+RUN pnpm install --frozen-lockfile
 COPY . .
-RUN npm run build
+RUN pnpm build
 
 # ---- Backend build ----
 FROM golang:1.22-alpine AS backend
@@ -28,6 +29,5 @@ ENV STATIC_DIR=/app/dist
 ENV ADDR=:8080
 COPY --from=frontend /app/dist /app/dist
 COPY --from=backend /out/gip-server /app/gip-server
-VOLUME ["/data"]
 EXPOSE 8080
 CMD ["/app/gip-server"]

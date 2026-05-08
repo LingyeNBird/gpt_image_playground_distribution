@@ -27,12 +27,12 @@ export default function Header({ adminButtonLabel = '后台', onOpenAdmin }: { a
         <div className="flex items-start gap-1">
           <h1 className="text-lg font-bold tracking-tight flex items-center gap-2">
             <a
-              href="https://github.com/CookSleep/gpt_image_playground"
+              href="https://github.com/LingyeNBird/gpt_image_playground_distribution"
               target="_blank"
               rel="noopener noreferrer"
               className="text-gray-800 dark:text-gray-100 hover:text-gray-600 dark:hover:text-gray-300 transition-colors"
             >
-              GPT Image Playground
+              GPT Image Playground Distribution
             </a>
             {version && (
               <span className="rounded-full bg-gray-100 px-2 py-0.5 text-[10px] font-medium text-gray-500 dark:bg-white/[0.06] dark:text-gray-400">

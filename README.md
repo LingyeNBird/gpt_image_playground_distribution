@@ -1,6 +1,6 @@
 # GPT Image Playground Distribution
 
-这是 [CookSleep/gpt_image_playground](https://github.com/CookSleep/gpt_image_playground) 的前后端分离分发版。它在原有图片生成/编辑 Web UI 基础上增加了 Go 后端、登录注册、管理员分发管理、用户额度、腾讯云 COS 存储桶模式和 Docker 持久化部署。
+这是一个面向多人分发部署的 GPT 图片生成/编辑平台，提供前后端分离架构，并增加了 Go 后端、登录注册、管理员分发管理、用户额度、腾讯云 COS 存储桶模式和 Docker 持久化部署。
 
 ## 主要变化
 
@@ -104,6 +104,9 @@ task --list
 ### 本地运行与维护
 
 ```bash
+# 安装 pnpm（如未安装）
+corepack enable
+
 # 安装依赖
 task deps
 
@@ -201,4 +204,4 @@ ghcr.io/lingyenbird/gpt_image_playground_distribution:latest
 
 ## License
 
-本项目基于上游项目 MIT License 改造。详见 [LICENSE](LICENSE)。
+本项目使用 MIT License。详见 [LICENSE](LICENSE)。

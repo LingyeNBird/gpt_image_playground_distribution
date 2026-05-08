@@ -8,5 +8,5 @@ services:
     ports:
       - "58946:8080"
     volumes:
-      - ./data:/data
+      - ./data:/data:rw
     restart: unless-stopped

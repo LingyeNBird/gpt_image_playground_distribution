@@ -62,13 +62,16 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
-          cache: npm
+          cache: pnpm
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.28.0
       - id: versions
         shell: bash
         run: |
           echo "frontend=$(tr -d '[:space:]' < VERSION.frontend)" >> "$GITHUB_OUTPUT"
-      - run: npm ci
-      - run: npm run build
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
       - name: Package frontend
         shell: bash
         run: |

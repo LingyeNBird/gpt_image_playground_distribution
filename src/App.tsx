@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { initStore } from './store'
 import { useStore } from './store'
 import { normalizeBaseUrl } from './lib/api'
+import { AUTH_INVALIDATED_EVENT } from './lib/backend'
 import { useDockerApiUrlMigrationNotice } from './hooks/useDockerApiUrlMigrationNotice'
 import type { ApiMode } from './types'
 import Header from './components/Header'
@@ -20,10 +21,14 @@ import AdminPanel from './components/AdminPanel'
 
 export default function App() {
   const setSettings = useStore((s) => s.setSettings)
+  const setCurrentUser = useStore((s) => s.setCurrentUser)
+  const setShowSettings = useStore((s) => s.setShowSettings)
   const currentUser = useStore((s) => s.currentUser)
   const authChecked = useStore((s) => s.authChecked)
-  const [showAdminPanel, setShowAdminPanel] = useState(false)
+  const [pathname, setPathname] = useState(() => window.location.pathname)
   useDockerApiUrlMigrationNotice()
+
+  const showAdminPanel = currentUser?.role === 'admin' && pathname === '/admin'
 
   useEffect(() => {
     const searchParams = new URLSearchParams(window.location.search)
@@ -76,6 +81,57 @@ export default function App() {
     return () => document.removeEventListener('dragstart', preventPageImageDrag)
   }, [])
 
+  useEffect(() => {
+    const syncPathname = () => setPathname(window.location.pathname)
+
+    window.addEventListener('popstate', syncPathname)
+    return () => window.removeEventListener('popstate', syncPathname)
+  }, [])
+
+  useEffect(() => {
+    const handleAuthInvalidated = () => {
+      setCurrentUser(null)
+      setShowSettings(false)
+    }
+
+    window.addEventListener(AUTH_INVALIDATED_EVENT, handleAuthInvalidated)
+    return () => window.removeEventListener(AUTH_INVALIDATED_EVENT, handleAuthInvalidated)
+  }, [setCurrentUser, setShowSettings])
+
+  useEffect(() => {
+    if (!authChecked) return
+
+    if (!currentUser) {
+      if (pathname !== '/' && pathname !== '/admin') {
+        window.history.replaceState(null, '', '/')
+        setPathname('/')
+      }
+      return
+    }
+
+    if (!currentUser) return
+
+    if (currentUser.role !== 'admin' && pathname === '/admin') {
+      window.history.replaceState(null, '', '/')
+      setPathname('/')
+      return
+    }
+
+    if (pathname !== '/' && pathname !== '/admin') {
+      const nextPath = currentUser.role === 'admin' ? pathname : '/'
+      if (nextPath !== pathname) {
+        window.history.replaceState(null, '', nextPath)
+        setPathname(nextPath)
+      }
+    }
+  }, [authChecked, currentUser, pathname])
+
+  const navigateTo = (nextPath: '/' | '/admin') => {
+    if (window.location.pathname === nextPath) return
+    window.history.pushState(null, '', nextPath)
+    setPathname(nextPath)
+  }
+
   if (!authChecked) {
     return <div className="min-h-screen grid place-items-center text-gray-400">加载中...</div>
   }
@@ -86,7 +142,7 @@ export default function App() {
     <>
       <Header
         adminButtonLabel={showAdminPanel ? '生图页' : '后台'}
-        onOpenAdmin={currentUser.role === 'admin' ? () => setShowAdminPanel((show) => !show) : undefined}
+        onOpenAdmin={currentUser.role === 'admin' ? () => navigateTo(showAdminPanel ? '/' : '/admin') : undefined}
       />
       {currentUser.role === 'admin' && showAdminPanel ? (
         <AdminPanel />

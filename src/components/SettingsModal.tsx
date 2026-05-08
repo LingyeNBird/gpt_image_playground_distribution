@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useStore } from '../store'
 import { useCloseOnEscape } from '../hooks/useCloseOnEscape'
-import { apiRequest } from '../lib/backend'
+import { apiRequest, isAuthError } from '../lib/backend'
 import { AdminButton, AdminInput, AdminSelect } from './adminUi'
 
 type AdminSettings = { baseUrl: string; apiKey: string; model: string; timeout: number; apiMode: string; codexCli: boolean }
@@ -35,7 +35,12 @@ export default function SettingsModal() {
     setMessage(null)
     apiRequest<AdminSettings>('/api/admin/settings')
       .then((data) => setAdminSettings({ ...defaultAdminSettings, ...data }))
-      .catch((err) => setMessage({ type: 'error', text: `读取上游设置失败：${err instanceof Error ? err.message : String(err)}` }))
+      .catch((err) => {
+        if (isAuthError(err)) {
+          return
+        }
+        setMessage({ type: 'error', text: `读取上游设置失败：${err instanceof Error ? err.message : String(err)}` })
+      })
   }, [showSettings, currentUser?.role])
 
   const handleClose = () => {
