@@ -19,7 +19,7 @@
 
 ### 1. 使用 Docker Compose
 
-仓库内已提供 `docker-compose.yml`：
+仓库根目录已提供 `docker-compose.yml`。如果你部署的是当前分发仓库本身，请直接在仓库根目录执行 `docker compose`，构建上下文就是当前目录：
 
 ```yaml
 services:
@@ -40,6 +40,20 @@ services:
 
 ```bash
 docker compose up -d
+```
+
+如果你只想直接使用已发布镜像，不在服务器本地构建，可删除 `build:` 段，仅保留：
+
+```yaml
+services:
+  gpt-image-playground:
+    image: ghcr.io/lingyenbird/gpt_image_playground_distribution:latest
+    container_name: gpt-image-playground
+    ports:
+      - "58946:8080"
+    volumes:
+      - ./data:/data
+    restart: unless-stopped
 ```
 
 访问：
