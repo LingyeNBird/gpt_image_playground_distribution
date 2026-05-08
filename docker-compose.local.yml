@@ -1,0 +1,12 @@
+services:
+  gpt-image-playground:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: gpt-image-playground:local
+    container_name: gpt-image-playground
+    ports:
+      - "58946:8080"
+    volumes:
+      - ./data:/data:rw
+    restart: unless-stopped

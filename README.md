@@ -19,7 +19,35 @@
 
 ### 1. 使用 Docker Compose
 
-仓库根目录已提供 `docker-compose.yml`。如果你部署的是当前分发仓库本身，请直接在仓库根目录执行 `docker compose`，构建上下文就是当前目录：
+仓库根目录已提供两份 Compose 文件：
+
+- `docker-compose.yml`：默认配置，保留 GHCR 镜像名，同时支持本地构建。
+- `docker-compose.local.yml`：明确只用于本地构建，不依赖 GHCR。
+
+如果你想明确使用本地构建版，请使用 `docker-compose.local.yml`：
+
+```yaml
+services:
+  gpt-image-playground:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: gpt-image-playground:local
+    container_name: gpt-image-playground
+    ports:
+      - "58946:8080"
+    volumes:
+      - ./data:/data
+    restart: unless-stopped
+```
+
+启动：
+
+```bash
+docker compose -f docker-compose.local.yml up -d --build
+```
+
+如果你想继续使用默认 `docker-compose.yml`，内容如下：
 
 ```yaml
 services:
