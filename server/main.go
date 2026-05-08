@@ -1003,14 +1003,15 @@ func (s *Server) executeGeneration(taskID string, settings AdminSettings, inputI
 	if task.Mode == "bucket" {
 		bucket := firstBucket(state.Buckets)
 		if bucket == nil {
-			s.executeGenerationFailure(taskID, started, "管理员尚未配置存储桶")
+			s.executeGenerationFailure(taskID, started, endpoint, timings, "管理员尚未配置存储桶")
 			return
 		}
 		for i, dataURL := range images {
 			uploadStarted := nowMs()
 			url, key, upErr := s.uploadToCOS(bucket, taskID, i, dataURL)
 			if upErr != nil {
-				s.executeGenerationFailure(taskID, started, upErr.Error())
+				timings = append(timings, TaskTiming{Key: fmt.Sprintf("bucket_upload_%d", i+1), Label: fmt.Sprintf("上传存储桶 #%d", i+1), Duration: nowMs() - uploadStarted, Detail: sanitizeError(upErr.Error(), "")})
+				s.executeGenerationFailure(taskID, started, endpoint, timings, upErr.Error())
 				return
 			}
 			timings = append(timings, TaskTiming{Key: fmt.Sprintf("bucket_upload_%d", i+1), Label: fmt.Sprintf("上传存储桶 #%d", i+1), Duration: nowMs() - uploadStarted, Detail: key})
@@ -1042,14 +1043,19 @@ func (s *Server) executeGeneration(taskID string, settings AdminSettings, inputI
 	})
 }
 
-func (s *Server) executeGenerationFailure(taskID string, started int64, msg string) {
+func (s *Server) executeGenerationFailure(taskID string, started int64, endpoint string, timings []TaskTiming, msg string) {
 	_ = s.store.with(func(st *AppState) error {
 		if t := st.Tasks[taskID]; t != nil {
+			t.Endpoint = endpoint
+			t.Timings = timings
 			t.Status = "error"
 			t.Error = msg
 			t.FinishedAt = nowMs()
 			t.Elapsed = t.FinishedAt - started
 			st.FailureLogs = append([]FailureLog{{ID: randomHex(12), UserID: t.UserID, Username: t.Username, TaskID: t.ID, Prompt: t.Prompt, Error: msg, CreatedAt: nowMs()}}, st.FailureLogs...)
+			if len(st.FailureLogs) > 500 {
+				st.FailureLogs = st.FailureLogs[:500]
+			}
 		}
 		return nil
 	})
@@ -1105,18 +1111,18 @@ func (s *Server) callUpstreamCodexCLIConcurrent(settings AdminSettings, task *Ge
 	timings := []TaskTiming{}
 	var mergedActual map[string]any
 	for _, result := range results {
+		if endpoint == "" && result.endpoint != "" {
+			endpoint = result.endpoint
+		}
+		timings = append(timings, result.timings...)
 		if result.err != nil {
 			continue
-		}
-		if endpoint == "" {
-			endpoint = result.endpoint
 		}
 		images = append(images, result.images...)
 		for range result.images {
 			actualList = append(actualList, result.actual)
 		}
 		revised = append(revised, result.revised...)
-		timings = append(timings, result.timings...)
 		if mergedActual == nil && result.actual != nil {
 			mergedActual = map[string]any{}
 			for k, v := range result.actual {

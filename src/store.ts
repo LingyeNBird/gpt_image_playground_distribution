@@ -70,9 +70,15 @@ function isTaskVisibleToUser(task: TaskRecord, user: CurrentUser | null): boolea
   return Boolean(user && task.ownerUserId === user.id)
 }
 
+function getHiddenTaskIdsForUser(user: CurrentUser | null): Set<string> {
+  if (!user) return new Set()
+  return new Set(useStore.getState().hiddenTaskIdsByUser[user.id] ?? [])
+}
+
 async function loadLocalTasksForUser(user: CurrentUser | null): Promise<void> {
   const tasks = await getAllTasks()
-  const visibleTasks = tasks.filter((task) => isTaskVisibleToUser(task, user))
+  const hiddenTaskIds = getHiddenTaskIdsForUser(user)
+  const visibleTasks = tasks.filter((task) => isTaskVisibleToUser(task, user) && !hiddenTaskIds.has(task.backendTaskId ?? task.id))
   useStore.getState().setTasks(visibleTasks)
 
   // 收集全部本地任务引用的图片 id，避免切换账号时误删其他用户的本地图片缓存。
@@ -118,8 +124,13 @@ function mergeTaskRecord(task: TaskRecord) {
 
 async function syncBackendTasksToLocal(user: CurrentUser): Promise<void> {
   const backendTasks = await fetchBackendTasks()
+  const hiddenTaskIds = getHiddenTaskIdsForUser(user)
 
   for (const backendTask of backendTasks) {
+    if (hiddenTaskIds.has(backendTask.id)) {
+      continue
+    }
+
     const result = backendTaskToResult(backendTask)
     const outputImages: string[] = []
     const outputImageUrls: Record<string, string> = {}
@@ -234,6 +245,8 @@ interface AppState {
   setCurrentUser: (user: CurrentUser | null) => void
   authChecked: boolean
   setAuthChecked: (checked: boolean) => void
+  hiddenTaskIdsByUser: Record<string, string[]>
+  hideTasksForCurrentUser: (ids: string[]) => void
   // 设置
   settings: AppSettings
   setSettings: (s: Partial<AppSettings>) => void
@@ -317,6 +330,25 @@ export const useStore = create<AppState>()(
       },
       authChecked: false,
       setAuthChecked: (authChecked) => set({ authChecked }),
+      hiddenTaskIdsByUser: {},
+      hideTasksForCurrentUser: (ids) => set((s) => {
+        const userId = s.currentUser?.id
+        if (!userId || ids.length === 0) return s
+        const next = new Set(s.hiddenTaskIdsByUser[userId] ?? [])
+        let changed = false
+        for (const id of ids) {
+          if (!id || next.has(id)) continue
+          next.add(id)
+          changed = true
+        }
+        if (!changed) return s
+        return {
+          hiddenTaskIdsByUser: {
+            ...s.hiddenTaskIdsByUser,
+            [userId]: Array.from(next),
+          },
+        }
+      }),
       settings: { ...DEFAULT_SETTINGS },
       setSettings: (s) => set((st) => ({
         settings: {
@@ -456,6 +488,7 @@ export const useStore = create<AppState>()(
         settings: state.settings,
         params: state.params,
         dismissedCodexCliPrompts: state.dismissedCodexCliPrompts,
+        hiddenTaskIdsByUser: state.hiddenTaskIdsByUser,
       }),
     },
   ),
@@ -815,11 +848,12 @@ export async function editOutputs(task: TaskRecord) {
 
 /** 删除多条任务 */
 export async function removeMultipleTasks(taskIds: string[]) {
-  const { tasks, setTasks, inputImages, showToast, clearSelection, selectedTaskIds } = useStore.getState()
+  const { tasks, setTasks, inputImages, showToast, clearSelection, selectedTaskIds, hideTasksForCurrentUser } = useStore.getState()
   
   if (!taskIds.length) return
 
   const toDelete = new Set(taskIds)
+  const hiddenTaskIds = tasks.filter((t) => toDelete.has(t.id)).map((t) => t.backendTaskId ?? t.id)
   const remaining = tasks.filter(t => !toDelete.has(t.id))
 
   // 收集所有被删除任务的关联图片
@@ -832,6 +866,7 @@ export async function removeMultipleTasks(taskIds: string[]) {
     }
   }
 
+  hideTasksForCurrentUser(hiddenTaskIds)
   setTasks(remaining)
   for (const id of taskIds) {
     await dbDeleteTask(id)
@@ -865,7 +900,7 @@ export async function removeMultipleTasks(taskIds: string[]) {
 
 /** 删除单条任务 */
 export async function removeTask(task: TaskRecord) {
-  const { tasks, setTasks, inputImages, showToast } = useStore.getState()
+  const { tasks, setTasks, inputImages, showToast, hideTasksForCurrentUser } = useStore.getState()
 
   // 收集此任务关联的图片
   const taskImageIds = new Set([
@@ -876,6 +911,7 @@ export async function removeTask(task: TaskRecord) {
 
   // 从列表移除
   const remaining = tasks.filter((t) => t.id !== task.id)
+  hideTasksForCurrentUser([task.backendTaskId ?? task.id])
   setTasks(remaining)
   await dbDeleteTask(task.id)
 
@@ -907,7 +943,7 @@ export async function clearAllData() {
   const { setTasks, clearInputImages, clearMaskDraft, setSettings, setParams, showToast } = useStore.getState()
   setTasks([])
   clearInputImages()
-  useStore.setState({ dismissedCodexCliPrompts: [] })
+  useStore.setState({ dismissedCodexCliPrompts: [], hiddenTaskIdsByUser: {} })
   clearMaskDraft()
   setSettings({ ...DEFAULT_SETTINGS })
   setParams({ ...DEFAULT_PARAMS })
