@@ -1084,25 +1084,31 @@ func (s *Server) callUpstreamCodexCLIConcurrent(settings AdminSettings, task *Ge
 		timings []TaskTiming
 		err     error
 	}, n)
+	var wg sync.WaitGroup
 
 	for i := 0; i < n; i++ {
-		taskCopy := *task
-		paramsCopy := map[string]any{}
-		for k, v := range task.Params {
-			paramsCopy[k] = v
-		}
-		paramsCopy["n"] = 1
-		taskCopy.Params = paramsCopy
-		images, actual, _, revised, endpoint, timings, err := s.callUpstreamImages(settings, &taskCopy, inputImages, maskDataURL)
-		results[i] = struct {
-			images  []string
-			actual  map[string]any
-			revised []string
-			endpoint string
-			timings []TaskTiming
-			err     error
-		}{images: images, actual: actual, revised: revised, endpoint: endpoint, timings: timings, err: err}
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			taskCopy := *task
+			paramsCopy := map[string]any{}
+			for k, v := range task.Params {
+				paramsCopy[k] = v
+			}
+			paramsCopy["n"] = 1
+			taskCopy.Params = paramsCopy
+			images, actual, _, revised, endpoint, timings, err := s.callUpstreamImages(settings, &taskCopy, inputImages, maskDataURL)
+			results[idx] = struct {
+				images  []string
+				actual  map[string]any
+				revised []string
+				endpoint string
+				timings []TaskTiming
+				err     error
+			}{images: images, actual: actual, revised: revised, endpoint: endpoint, timings: timings, err: err}
+		}(i)
 	}
+	wg.Wait()
 
 	images := []string{}
 	actualList := []map[string]any{}

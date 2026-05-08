@@ -75,6 +75,20 @@ function getHiddenTaskIdsForUser(user: CurrentUser | null): Set<string> {
   return new Set(useStore.getState().hiddenTaskIdsByUser[user.id] ?? [])
 }
 
+function syncTaskIntoVisibleStore(task: TaskRecord, replacedTaskId?: string) {
+  useStore.setState((state) => {
+    const nextTasks = state.tasks.filter(
+      (item) =>
+        item.id !== task.id &&
+        item.backendTaskId !== task.backendTaskId &&
+        item.id !== replacedTaskId,
+    )
+    nextTasks.push(task)
+    nextTasks.sort((a, b) => b.createdAt - a.createdAt)
+    return { tasks: nextTasks }
+  })
+}
+
 async function loadLocalTasksForUser(user: CurrentUser | null): Promise<void> {
   const tasks = await getAllTasks()
   const hiddenTaskIds = getHiddenTaskIdsForUser(user)
@@ -183,6 +197,7 @@ async function syncBackendTasksToLocal(user: CurrentUser): Promise<void> {
     if (merged.replacedTaskId) {
       await dbDeleteTask(merged.replacedTaskId)
     }
+    syncTaskIntoVisibleStore(merged.task, merged.replacedTaskId)
   }
 }
 
@@ -541,17 +556,16 @@ export async function initStore() {
   } catch {
     currentUser = null
     useStore.setState({ currentUser: null })
-  } finally {
-    useStore.getState().setAuthChecked(true)
-  }
-
-  if (currentUser) {
-    await syncBackendTasksToLocal(currentUser)
   }
 
   await loadLocalTasksForUser(currentUser)
+  useStore.getState().setAuthChecked(true)
+
   if (currentUser) {
     void resumeRunningTasks()
+    void syncBackendTasksToLocal(currentUser)
+      .then(() => loadLocalTasksForUser(currentUser))
+      .catch(() => undefined)
   }
 }
 
