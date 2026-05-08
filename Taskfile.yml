@@ -10,106 +10,117 @@ vars:
 
 tasks:
   default:
-    desc: List available tasks
+    desc: 列出可用任务
     cmds:
       - task --list
 
   deps:
-    desc: Install frontend dependencies
+    desc: 安装前端依赖
     cmds:
       - pnpm install --frozen-lockfile
 
   test:
-    desc: Run frontend and Go backend tests
+    desc: 运行前端与 Go 后端测试
     cmds:
       - pnpm test
       - cmd: go test ./...
         dir: server
 
   build:frontend:
-    desc: Build frontend assets locally
+    desc: 本地构建前端静态资源
     cmds:
       - pnpm build
 
   build:backend:
-    desc: Build Go backend binary locally
+    desc: 本地构建 Go 后端二进制
     cmds:
       - cmd: go build -o ../bin/gip-server .
         dir: server
 
   docker:build-local:
-    desc: Optional local Docker build for debugging only
+    desc: 仅供调试使用的本地 Docker 构建
     cmds:
       - docker build -t {{.IMAGE}}:{{.TAG}} .
 
   docker:publish:
-    desc: Trigger GitHub Actions to build and push Docker image to GHCR
+    desc: 触发 GitHub Actions 构建并推送 Docker 镜像到 GHCR
     cmds:
       - gh workflow run {{.DOCKER_WORKFLOW}} --repo {{.GITHUB_REPO}} --ref main
       - gh run list --repo {{.GITHUB_REPO}} --workflow {{.DOCKER_WORKFLOW}} --limit 1
 
   docker:publish-watch:
-    desc: Trigger GitHub Actions Docker build and watch the run
+    desc: 触发 GitHub Actions Docker 构建并持续观察运行状态
     cmds:
       - gh workflow run {{.DOCKER_WORKFLOW}} --repo {{.GITHUB_REPO}} --ref main
       - powershell -NoProfile -Command "Start-Sleep -Seconds 5"
       - gh run watch --repo {{.GITHUB_REPO}} $(gh run list --repo {{.GITHUB_REPO}} --workflow {{.DOCKER_WORKFLOW}} --limit 1 --json databaseId --jq '.[0].databaseId')
 
   release:publish:
-    desc: Trigger GitHub Actions to build release binaries and frontend assets
+    desc: 触发 GitHub Actions 构建发布二进制与前端静态资源
     cmds:
       - gh workflow run {{.RELEASE_WORKFLOW}} --repo {{.GITHUB_REPO}} --ref main
       - gh run list --repo {{.GITHUB_REPO}} --workflow {{.RELEASE_WORKFLOW}} --limit 1
 
   release:publish-watch:
-    desc: Trigger release asset build and watch the GitHub Actions run
+    desc: 触发发布资源构建并持续观察 GitHub Actions 运行状态
     cmds:
       - gh workflow run {{.RELEASE_WORKFLOW}} --repo {{.GITHUB_REPO}} --ref main
       - powershell -NoProfile -Command "Start-Sleep -Seconds 5"
       - gh run watch --repo {{.GITHUB_REPO}} $(gh run list --repo {{.GITHUB_REPO}} --workflow {{.RELEASE_WORKFLOW}} --limit 1 --json databaseId --jq '.[0].databaseId')
 
   up:
-    desc: Build locally and start/recreate Compose service
+    desc: 本地构建并启动或重建 Compose 服务
     cmds:
       - docker compose up -d --build
 
+  up:local:
+    desc: 使用 docker-compose.local.yml 的本地镜像启动或重建服务
+    cmds:
+      - docker compose -f docker-compose.local.yml up -d --build
+
+  rebuild:local:
+    desc: 使用 docker-compose.local.yml 重新构建本地镜像并重建服务
+    cmds:
+      - docker compose -f docker-compose.local.yml down
+      - docker compose -f docker-compose.local.yml up -d --build
+
   pull:
-    desc: Pull latest image from GHCR
+    desc: 拉取 GHCR 上的最新镜像
     cmds:
       - docker compose pull
 
   redeploy:
-    desc: Pull latest image from GHCR and recreate Compose service
+    desc: 拉取 GHCR 最新镜像并重建 Compose 服务
     cmds:
       - docker compose pull
       - docker compose up -d
 
   restart:
-    desc: Restart Compose service
+    desc: 重启 Compose 服务
     cmds:
       - docker compose restart
 
   down:
-    desc: Stop and remove Compose service (keeps ./data)
+    desc: 停止并删除 Compose 服务（保留 ./data）
     cmds:
       - docker compose down
 
   logs:
-    desc: Follow service logs
+    desc: 持续查看服务日志
     cmds:
       - docker compose logs -f {{.SERVICE}}
 
   ps:
-    desc: Show Compose status
+    desc: 查看 Compose 服务状态
     cmds:
       - docker compose ps
 
   admin-key:
-    desc: Show initial admin key from container logs if still present
+    desc: 如果日志中仍存在，则显示容器里的管理员密钥
     cmds:
       - powershell -NoProfile -Command "docker logs {{.SERVICE}} 2>&1 | Select-String 'initial admin key'"
 
   clean:image:
-    desc: Remove local Docker image
+    desc: 删除本地 Docker 镜像
     cmds:
       - docker image rm {{.IMAGE}}:{{.TAG}}
