@@ -231,6 +231,7 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/admin/buckets/", s.requireAdmin(s.handleAdminBucketByID))
 	mux.HandleFunc("/api/admin/failures", s.requireAdmin(s.handleAdminFailures))
 	mux.HandleFunc("/api/admin/audit", s.requireAdmin(s.handleAdminAudit))
+	mux.HandleFunc("/api/admin/tasks", s.requireAdmin(s.handleAdminTasks))
 	mux.HandleFunc("/api/admin/update/check", s.requireAdmin(s.handleUpdateCheck))
 	mux.HandleFunc("/api/admin/update/backend", s.requireAdmin(s.handleUpdateBackend))
 	mux.HandleFunc("/api/admin/update/frontend", s.requireAdmin(s.handleUpdateFrontend))
