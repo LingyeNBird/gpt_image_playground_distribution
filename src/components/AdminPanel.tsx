@@ -24,6 +24,8 @@ export default function AdminPanel() {
   const [buckets, setBuckets] = useState<Bucket[]>([])
   const [failures, setFailures] = useState<Failure[]>([])
   const [records, setRecords] = useState<AdminTaskRecord[]>([])
+  const [recordsLoading, setRecordsLoading] = useState(true)
+  const [recordsError, setRecordsError] = useState('')
   const [selectedRecord, setSelectedRecord] = useState<AdminTaskRecord | null>(null)
   const [audit, setAudit] = useState<AuditEntry[]>([])
   const [auditHasMore, setAuditHasMore] = useState(false)
@@ -75,11 +77,18 @@ export default function AdminPanel() {
   }
 
   const loadRecords = useCallback(async () => {
+    setRecordsLoading(true)
+    setRecordsError('')
     try {
       const payload = await apiRequest<{ tasks: AdminTaskRecord[] }>('/api/admin/tasks')
       setRecords(payload.tasks ?? [])
-    } catch {
-      setRecords([])
+    } catch (err) {
+      if (isAuthError(err)) {
+        return
+      }
+      setRecordsError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setRecordsLoading(false)
     }
   }, [])
 
@@ -200,7 +209,7 @@ export default function AdminPanel() {
       {toast && <AdminToast key={toast.id} type={toast.type} text={toast.text} onClose={() => setToast(null)} />}
 
         {tab === 'users' && <UsersTab users={users} audit={audit} failures={failures} usersLoading={usersLoading} usersError={usersError} auditLoading={auditLoading} auditHasMore={auditHasMore} patchUser={patchUser} reload={loadUsers} setUsers={setUsers} refreshAudit={refreshAudit} loadOlderAudit={() => loadAuditPage(audit.length)} />}
-      {tab === 'records' && <RecordsTab records={records} onSelect={setSelectedRecord} />}
+      {tab === 'records' && <RecordsTab records={records} loading={recordsLoading} error={recordsError} onSelect={setSelectedRecord} />}
       {tab === 'storage' && <StorageTab buckets={buckets} editingBucket={editingBucket} setEditingBucket={setEditingBucket} formVersion={storageFormVersion} saveBucket={saveBucket} deleteBucket={deleteBucket} />}
       {tab === 'updates' && <UpdatesTab setGlobalMessage={(msg) => showToast(msg)} />}
       </main>
@@ -211,7 +220,7 @@ export default function AdminPanel() {
   )
 }
 
-function RecordsTab({ records, onSelect }: { records: AdminTaskRecord[]; onSelect: (record: AdminTaskRecord) => void }) {
+function RecordsTab({ records, loading, error, onSelect }: { records: AdminTaskRecord[]; loading: boolean; error: string; onSelect: (record: AdminTaskRecord) => void }) {
   return <AdminCard>
     <div className="border-b border-[#c3c6d7] p-6">
       <h3 className="text-lg font-semibold leading-[1.4] text-[#191b23]">生图记录</h3>
@@ -221,8 +230,10 @@ function RecordsTab({ records, onSelect }: { records: AdminTaskRecord[]; onSelec
       <table className="w-full min-w-[1100px] border-collapse text-left text-sm">
         <thead><tr className="border-b border-[#c3c6d7] text-xs font-normal uppercase leading-none tracking-wider text-[#434655]"><th className="px-2 py-2 font-normal">用户</th><th className="px-2 py-2 font-normal">状态</th><th className="px-2 py-2 font-normal">端点</th><th className="px-2 py-2 font-normal">模式</th><th className="px-2 py-2 font-normal">总耗时</th><th className="px-2 py-2 font-normal">用时细节</th><th className="px-2 py-2 font-normal">时间</th><th className="px-2 py-2 font-normal">操作</th></tr></thead>
         <tbody className="text-sm leading-[1.5] text-[#191b23]">
-          {records.length === 0 && <tr><td colSpan={8} className="px-2 py-8 text-center text-[#434655]">暂无生图记录。</td></tr>}
-          {records.map((record) => <tr key={record.id} className="border-b border-[#e1e2ed] transition-colors hover:bg-[#faf8ff]"><td className="px-2 py-4"><div className="font-medium">{record.username}</div><div className="mt-1 text-xs text-[#434655]">ID: {record.userId.slice(0, 4)}</div></td><td className="px-2 py-4"><AdminTag tone={record.status === 'done' ? 'success' : record.status === 'error' ? 'danger' : 'info'}>{record.status === 'done' ? '完成' : record.status === 'error' ? '失败' : '进行中'}</AdminTag></td><td className="px-2 py-4"><div className="max-w-[260px] break-all font-mono text-xs text-[#434655]">{record.endpoint || '-'}</div></td><td className="px-2 py-4">{record.mode === 'bucket' ? '存储桶' : '直传'}</td><td className="px-2 py-4">{formatDuration(record.elapsed)}</td><td className="px-2 py-4"><div className="max-w-[320px] text-xs text-[#434655]">{summarizeTimings(record.timings)}</div></td><td className="px-2 py-4 text-xs text-[#434655]">{new Date(record.createdAt).toLocaleString()}</td><td className="px-2 py-4"><AdminTextButton onClick={() => onSelect(record)}>查看详情</AdminTextButton></td></tr>)}
+          {loading && <tr><td colSpan={8} className="px-2 py-8 text-center text-[#434655]">正在加载生图记录…</td></tr>}
+          {!loading && error && <tr><td colSpan={8} className="px-2 py-8 text-center text-[#ba1a1a]">生图记录加载失败：{error}</td></tr>}
+          {!loading && !error && records.length === 0 && <tr><td colSpan={8} className="px-2 py-8 text-center text-[#434655]">暂无生图记录。</td></tr>}
+          {!loading && !error && records.map((record) => <tr key={record.id} className="border-b border-[#e1e2ed] transition-colors hover:bg-[#faf8ff]"><td className="px-2 py-4"><div className="font-medium">{record.username}</div><div className="mt-1 text-xs text-[#434655]">ID: {record.userId.slice(0, 4)}</div></td><td className="px-2 py-4"><AdminTag tone={record.status === 'done' ? 'success' : record.status === 'error' ? 'danger' : 'info'}>{record.status === 'done' ? '完成' : record.status === 'error' ? '失败' : '进行中'}</AdminTag></td><td className="px-2 py-4"><div className="max-w-[260px] break-all font-mono text-xs text-[#434655]">{record.endpoint || '-'}</div></td><td className="px-2 py-4">{record.mode === 'bucket' ? '存储桶' : '直传'}</td><td className="px-2 py-4">{formatDuration(record.elapsed)}</td><td className="px-2 py-4"><div className="max-w-[320px] text-xs text-[#434655]">{summarizeTimings(record.timings)}</div></td><td className="px-2 py-4 text-xs text-[#434655]">{new Date(record.createdAt).toLocaleString()}</td><td className="px-2 py-4"><AdminTextButton onClick={() => onSelect(record)}>查看详情</AdminTextButton></td></tr>)}
         </tbody>
       </table>
     </div>

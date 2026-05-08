@@ -131,6 +131,38 @@ export async function fetchBackendTasks(): Promise<BackendTask[]> {
   return payload.tasks ?? []
 }
 
+function isManagedApiUrl(sourceUrl: string): boolean {
+  if (sourceUrl.startsWith('/api/')) return true
+  if (typeof window === 'undefined') return false
+  try {
+    const url = new URL(sourceUrl, window.location.origin)
+    return url.origin === window.location.origin && url.pathname.startsWith('/api/')
+  } catch {
+    return false
+  }
+}
+
+export async function fetchBackendImage(sourceUrl: string, init?: RequestInit): Promise<Response> {
+  const response = await fetch(sourceUrl, {
+    credentials: 'include',
+    cache: 'no-store',
+    ...init,
+  })
+  if (!response.ok) {
+    const message = isManagedApiUrl(sourceUrl) ? await readError(response) : `HTTP ${response.status}`
+    notifyAuthInvalidated(message)
+    throw new Error(message)
+  }
+  return response
+}
+
+export async function hideBackendTasks(ids: string[]): Promise<void> {
+  await apiRequest('/api/tasks/hide', {
+    method: 'POST',
+    body: JSON.stringify({ ids }),
+  })
+}
+
 export function backendTaskImageUrl(id: string): string {
   return `/api/task-images/${encodeURIComponent(id)}`
 }

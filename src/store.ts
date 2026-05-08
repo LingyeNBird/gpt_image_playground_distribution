@@ -23,7 +23,7 @@ import {
   storeImage,
   hashDataUrl,
 } from './lib/db'
-import { backendTaskImageUrl, backendTaskToResult, fetchBackendTask, fetchBackendTasks, getCurrentUser, submitBackendTask } from './lib/backend'
+import { backendTaskImageUrl, backendTaskToResult, fetchBackendImage, fetchBackendTask, fetchBackendTasks, getCurrentUser, hideBackendTasks, submitBackendTask } from './lib/backend'
 import { validateMaskMatchesImage } from './lib/canvasImage'
 import { orderInputImagesForMask } from './lib/mask'
 import { normalizeImageSize } from './lib/size'
@@ -33,6 +33,19 @@ import { zipSync, unzipSync, strToU8, strFromU8 } from 'fflate'
 // 内存缓存，id → dataUrl，避免每次从 IndexedDB 读取
 
 const imageCache = new Map<string, string>()
+let taskHydrationVersion = 0
+
+function nextTaskHydrationVersion(): number {
+  taskHydrationVersion += 1
+  return taskHydrationVersion
+}
+
+function isCurrentHydrationTarget(user: CurrentUser | null, version: number): boolean {
+  const currentUser = useStore.getState().currentUser
+  return taskHydrationVersion === version
+    && (currentUser?.id ?? null) === (user?.id ?? null)
+    && (currentUser?.role ?? null) === (user?.role ?? null)
+}
 
 export function getCachedImage(id: string): string | undefined {
   return imageCache.get(id)
@@ -40,11 +53,7 @@ export function getCachedImage(id: string): string | undefined {
 
 async function cacheRemoteImage(id: string, sourceUrl: string): Promise<string | undefined> {
   try {
-    const response = await fetch(sourceUrl, {
-      credentials: 'include',
-      cache: 'force-cache',
-    })
-    if (!response.ok) return undefined
+    const response = await fetchBackendImage(sourceUrl, { cache: 'force-cache' })
     const blob = await response.blob()
     const dataUrl = await new Promise<string>((resolve, reject) => {
       const reader = new FileReader()
@@ -118,17 +127,18 @@ function syncTaskIntoVisibleStore(task: TaskRecord, replacedTaskId?: string) {
   })
 }
 
-async function hydrateTasksForCurrentUser(currentUser: CurrentUser | null) {
-  await loadLocalTasksForUser(currentUser)
-  if (!currentUser) return
+async function hydrateTasksForCurrentUser(currentUser: CurrentUser | null, version: number) {
+  await loadLocalTasksForUser(currentUser, version)
+  if (!currentUser || !isCurrentHydrationTarget(currentUser, version)) return
   void resumeRunningTasks()
-  void syncBackendTasksToLocal(currentUser)
-    .then(() => loadLocalTasksForUser(currentUser))
+  void syncBackendTasksToLocal(currentUser, version)
+    .then(() => loadLocalTasksForUser(currentUser, version))
     .catch(() => undefined)
 }
 
-async function loadLocalTasksForUser(user: CurrentUser | null): Promise<void> {
+async function loadLocalTasksForUser(user: CurrentUser | null, version?: number): Promise<void> {
   const tasks = await getAllTasks()
+  if (version != null && !isCurrentHydrationTarget(user, version)) return
   const hiddenTaskIds = getHiddenTaskIdsForUser(user)
   const visibleTasks = tasks.filter((task) => isTaskVisibleToUser(task, user) && !hiddenTaskIds.has(task.backendTaskId ?? task.id))
   useStore.getState().setTasks(visibleTasks)
@@ -141,7 +151,6 @@ async function loadLocalTasksForUser(user: CurrentUser | null): Promise<void> {
     for (const id of t.outputImages || []) referencedIds.add(id)
   }
 
-  imageCache.clear()
   const visibleImageIds = new Set<string>()
   for (const t of visibleTasks) {
     for (const id of t.inputImageIds || []) visibleImageIds.add(id)
@@ -150,6 +159,8 @@ async function loadLocalTasksForUser(user: CurrentUser | null): Promise<void> {
   }
 
   const images = await getAllImages()
+  if (version != null && !isCurrentHydrationTarget(user, version)) return
+  imageCache.clear()
   for (const img of images) {
     if (visibleImageIds.has(img.id)) {
       imageCache.set(img.id, img.dataUrl)
@@ -174,11 +185,13 @@ function mergeTaskRecord(task: TaskRecord) {
   }
 }
 
-async function syncBackendTasksToLocal(user: CurrentUser): Promise<void> {
+async function syncBackendTasksToLocal(user: CurrentUser, version?: number): Promise<void> {
   const backendTasks = await fetchBackendTasks()
+  if (version != null && !isCurrentHydrationTarget(user, version)) return
   const hiddenTaskIds = getHiddenTaskIdsForUser(user)
 
   for (const backendTask of backendTasks) {
+    if (version != null && !isCurrentHydrationTarget(user, version)) return
     if (hiddenTaskIds.has(backendTask.id)) {
       continue
     }
@@ -224,6 +237,7 @@ async function syncBackendTasksToLocal(user: CurrentUser): Promise<void> {
     if (merged.replacedTaskId) {
       await dbDeleteTask(merged.replacedTaskId)
     }
+    if (version != null && !isCurrentHydrationTarget(user, version)) return
     syncTaskIntoVisibleStore(merged.task, merged.replacedTaskId)
   }
 }
@@ -357,8 +371,9 @@ export const useStore = create<AppState>()(
       // Settings
       currentUser: null,
       setCurrentUser: (currentUser) => {
+        const hydrationVersion = nextTaskHydrationVersion()
         set({ currentUser, tasks: [], selectedTaskIds: [], detailTaskId: null, lightboxImageId: null, lightboxImageList: [] })
-        void hydrateTasksForCurrentUser(currentUser)
+        void hydrateTasksForCurrentUser(currentUser, hydrationVersion)
       },
       authChecked: false,
       setAuthChecked: (authChecked) => set({ authChecked }),
@@ -566,6 +581,7 @@ function normalizeParamsForSettings(params: TaskParams, settings: AppSettings): 
 
 /** 初始化：从 IndexedDB 加载任务和图片缓存，清理孤立图片 */
 export async function initStore() {
+  const hydrationVersion = nextTaskHydrationVersion()
   let currentUser: CurrentUser | null = null
   try {
     currentUser = await getCurrentUser()
@@ -575,13 +591,13 @@ export async function initStore() {
     useStore.setState({ currentUser: null })
   }
 
-  await loadLocalTasksForUser(currentUser)
+  await loadLocalTasksForUser(currentUser, hydrationVersion)
   useStore.getState().setAuthChecked(true)
 
-  if (currentUser) {
+  if (currentUser && isCurrentHydrationTarget(currentUser, hydrationVersion)) {
     void resumeRunningTasks()
-    void syncBackendTasksToLocal(currentUser)
-      .then(() => loadLocalTasksForUser(currentUser))
+    void syncBackendTasksToLocal(currentUser, hydrationVersion)
+      .then(() => loadLocalTasksForUser(currentUser, hydrationVersion))
       .catch(() => undefined)
   }
 }
@@ -790,31 +806,57 @@ export function updateTaskInStore(taskId: string, patch: Partial<TaskRecord>) {
 
 /** 重试失败的任务：创建新任务并执行 */
 export async function retryTask(task: TaskRecord) {
-  const { settings, currentUser } = useStore.getState()
+  const { settings, currentUser, showToast } = useStore.getState()
   if (!currentUser || currentUser.role !== 'user') return
-  const normalizedParams = normalizeParamsForSettings(task.params, settings)
-  const taskId = genId()
-  const newTask: TaskRecord = {
-    id: taskId,
-    ownerUserId: currentUser.id,
-    prompt: task.prompt,
-    params: normalizedParams,
-    inputImageIds: [...task.inputImageIds],
-    maskTargetImageId: task.maskTargetImageId ?? null,
-    maskImageId: task.maskImageId ?? null,
-    outputImages: [],
-    status: 'running',
-    error: null,
-    createdAt: Date.now(),
-    finishedAt: null,
-    elapsed: null,
+  try {
+    const normalizedParams = normalizeParamsForSettings(task.params, settings)
+    const deliveryMode = task.deliveryMode ?? settings.deliveryMode ?? DEFAULT_SETTINGS.deliveryMode
+    const inputImageDataUrls: string[] = []
+    for (const inputImageId of task.inputImageIds) {
+      const dataUrl = await ensureImageCached(inputImageId)
+      if (!dataUrl?.startsWith('data:image/')) throw new Error('缺少原始输入图片，无法重试，请先重新上传原图')
+      inputImageDataUrls.push(dataUrl)
+    }
+    const maskDataUrl = task.maskImageId ? await ensureImageCached(task.maskImageId) : undefined
+    if (maskDataUrl && !maskDataUrl.startsWith('data:image/')) {
+      throw new Error('缺少遮罩图片，无法重试，请先重新上传原图后再编辑')
+    }
+
+    const backendTask = await submitBackendTask({
+      settings: { ...settings, deliveryMode },
+      prompt: task.prompt,
+      params: normalizedParams,
+      inputImageDataUrls,
+      maskDataUrl,
+    })
+
+    const newTask: TaskRecord = {
+      id: backendTask.id,
+      ownerUserId: currentUser.id,
+      prompt: task.prompt,
+      params: normalizedParams,
+      inputImageIds: [...task.inputImageIds],
+      maskTargetImageId: task.maskTargetImageId ?? null,
+      maskImageId: task.maskImageId ?? null,
+      outputImages: [],
+      outputImageUrls: {},
+      backendTaskId: backendTask.id,
+      deliveryMode,
+      status: 'running',
+      error: null,
+      createdAt: backendTask.createdAt,
+      finishedAt: null,
+      elapsed: null,
+    }
+
+    const latestTasks = useStore.getState().tasks
+    useStore.getState().setTasks([newTask, ...latestTasks])
+    await putTask(newTask)
+
+    void executeTask(backendTask.id)
+  } catch (err) {
+    showToast(err instanceof Error ? err.message : String(err), 'error')
   }
-
-  const latestTasks = useStore.getState().tasks
-  useStore.getState().setTasks([newTask, ...latestTasks])
-  await putTask(newTask)
-
-  executeTask(taskId)
 }
 
 /** 复用配置 */
@@ -869,13 +911,23 @@ export async function editOutputs(task: TaskRecord) {
 
 /** 删除多条任务 */
 export async function removeMultipleTasks(taskIds: string[]) {
-  const { tasks, setTasks, inputImages, showToast, clearSelection, selectedTaskIds, hideTasksForCurrentUser } = useStore.getState()
+  const { tasks, setTasks, inputImages, showToast, selectedTaskIds, hideTasksForCurrentUser } = useStore.getState()
   
   if (!taskIds.length) return
 
   const toDelete = new Set(taskIds)
+  const backendTaskIds = Array.from(new Set(tasks.filter((t) => toDelete.has(t.id)).map((t) => t.backendTaskId).filter((id): id is string => Boolean(id))))
   const hiddenTaskIds = tasks.filter((t) => toDelete.has(t.id)).map((t) => t.backendTaskId ?? t.id)
   const remaining = tasks.filter(t => !toDelete.has(t.id))
+
+  if (backendTaskIds.length > 0) {
+    try {
+      await hideBackendTasks(backendTaskIds)
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : String(err), 'error')
+      return
+    }
+  }
 
   // 收集所有被删除任务的关联图片
   const deletedImageIds = new Set<string>()
@@ -922,6 +974,15 @@ export async function removeMultipleTasks(taskIds: string[]) {
 /** 删除单条任务 */
 export async function removeTask(task: TaskRecord) {
   const { tasks, setTasks, inputImages, showToast, hideTasksForCurrentUser } = useStore.getState()
+
+  if (task.backendTaskId) {
+    try {
+      await hideBackendTasks([task.backendTaskId])
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : String(err), 'error')
+      return
+    }
+  }
 
   // 收集此任务关联的图片
   const taskImageIds = new Set([

@@ -34,10 +34,10 @@ import (
 )
 
 const (
-	cookieName      = "gip_session"
-	defaultDataDir  = "/data"
-	defaultBindAddr = ":8080"
-	releaseRepo     = "LingyeNBird/gpt_image_playground_distribution"
+	cookieName               = "gip_session"
+	defaultDataDir           = "/data"
+	defaultBindAddr          = ":8080"
+	releaseRepo              = "LingyeNBird/gpt_image_playground_distribution"
 	promptRewriteGuardPrefix = "Use the following text as the complete prompt. Do not rewrite it:"
 )
 
@@ -72,17 +72,18 @@ type AppState struct {
 }
 
 type User struct {
-	ID           string `json:"id"`
-	Username     string `json:"username"`
-	PasswordHash string `json:"passwordHash"`
-	Disabled     bool   `json:"disabled"`
-	Banned       bool   `json:"banned"`
-	QuotaTotal   int    `json:"quotaTotal"`
-	QuotaUsed    int    `json:"quotaUsed"`
-	AllowDirect  bool   `json:"allowDirect"`
-	AllowBucket  bool   `json:"allowBucket"`
-	CreatedAt    int64  `json:"createdAt"`
-	LastSeenAt   int64  `json:"lastSeenAt"`
+	ID            string   `json:"id"`
+	Username      string   `json:"username"`
+	PasswordHash  string   `json:"passwordHash"`
+	Disabled      bool     `json:"disabled"`
+	Banned        bool     `json:"banned"`
+	QuotaTotal    int      `json:"quotaTotal"`
+	QuotaUsed     int      `json:"quotaUsed"`
+	AllowDirect   bool     `json:"allowDirect"`
+	AllowBucket   bool     `json:"allowBucket"`
+	HiddenTaskIDs []string `json:"hiddenTaskIds,omitempty"`
+	CreatedAt     int64    `json:"createdAt"`
+	LastSeenAt    int64    `json:"lastSeenAt"`
 }
 
 type AdminSettings struct {
@@ -222,6 +223,7 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/version", s.handleVersion)
 	mux.HandleFunc("/api/generate", s.requireUser(s.handleGenerate))
 	mux.HandleFunc("/api/tasks", s.requireUser(s.handleTasks))
+	mux.HandleFunc("/api/tasks/hide", s.requireUser(s.handleTaskHide))
 	mux.HandleFunc("/api/tasks/", s.requireUser(s.handleTaskByID))
 	mux.HandleFunc("/api/task-images/", s.requireUser(s.handleTaskImageByID))
 	mux.HandleFunc("/api/admin/settings", s.requireAdmin(s.handleAdminSettings))
@@ -288,6 +290,11 @@ func (st *Store) load() error {
 	}
 	if st.state.Tasks == nil {
 		st.state.Tasks = map[string]*GenerationTask{}
+	}
+	for _, user := range st.state.Users {
+		if user.HiddenTaskIDs == nil {
+			user.HiddenTaskIDs = []string{}
+		}
 	}
 	if st.state.FailureLogs == nil {
 		st.state.FailureLogs = []FailureLog{}
@@ -634,9 +641,10 @@ func (s *Server) handleTasks(w http.ResponseWriter, r *http.Request, sess *Sessi
 		return
 	}
 	state := s.store.snapshot()
+	hiddenTaskIDs := hiddenTaskSetForUser(state.Users[sess.UserID])
 	var tasks []*GenerationTask
 	for _, t := range state.Tasks {
-		if t.UserID == sess.UserID {
+		if t.UserID == sess.UserID && !taskHidden(hiddenTaskIDs, t.ID) {
 			tasks = append(tasks, sanitizeTaskForUser(t))
 		}
 	}
@@ -644,11 +652,61 @@ func (s *Server) handleTasks(w http.ResponseWriter, r *http.Request, sess *Sessi
 	writeJSON(w, map[string]any{"tasks": tasks})
 }
 
+func (s *Server) handleTaskHide(w http.ResponseWriter, r *http.Request, sess *Session) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w)
+		return
+	}
+	var req struct {
+		IDs []string `json:"ids"`
+	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	state := s.store.snapshot()
+	user := state.Users[sess.UserID]
+	if user == nil {
+		httpError(w, 404, "用户不存在")
+		return
+	}
+	hiddenTaskIDs := hiddenTaskSetForUser(user)
+	toHide := make([]string, 0, len(req.IDs))
+	for _, rawID := range req.IDs {
+		id := strings.TrimSpace(rawID)
+		if id == "" || taskHidden(hiddenTaskIDs, id) {
+			continue
+		}
+		task := state.Tasks[id]
+		if task == nil || task.UserID != sess.UserID {
+			continue
+		}
+		hiddenTaskIDs[id] = struct{}{}
+		toHide = append(toHide, id)
+	}
+	if len(toHide) == 0 {
+		writeJSON(w, map[string]any{"ok": true})
+		return
+	}
+	if err := s.store.with(func(st *AppState) error {
+		currentUser := st.Users[sess.UserID]
+		if currentUser == nil {
+			return errors.New("用户不存在")
+		}
+		currentUser.HiddenTaskIDs = append(currentUser.HiddenTaskIDs, toHide...)
+		appendAudit(st, "generation_hide", "生图记录已隐藏", fmt.Sprintf("%s 隐藏了 %d 条生图记录。", sess.Username, len(toHide)), sess.UserID, sess.Username)
+		return nil
+	}); err != nil {
+		httpError(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true})
+}
+
 func (s *Server) handleTaskByID(w http.ResponseWriter, r *http.Request, sess *Session) {
 	id := strings.TrimPrefix(r.URL.Path, "/api/tasks/")
 	state := s.store.snapshot()
 	t := state.Tasks[id]
-	if t == nil || t.UserID != sess.UserID {
+	if t == nil || t.UserID != sess.UserID || taskHidden(hiddenTaskSetForUser(state.Users[sess.UserID]), t.ID) {
 		http.NotFound(w, r)
 		return
 	}
@@ -980,9 +1038,13 @@ func (s *Server) handleTaskImageByID(w http.ResponseWriter, r *http.Request, ses
 		return
 	}
 	state := s.store.snapshot()
+	hiddenTaskIDs := map[string]struct{}{}
+	if sess.Role != "admin" {
+		hiddenTaskIDs = hiddenTaskSetForUser(state.Users[sess.UserID])
+	}
 	var found *GeneratedImage
 	for _, task := range state.Tasks {
-		if sess.Role != "admin" && task.UserID != sess.UserID {
+		if sess.Role != "admin" && (task.UserID != sess.UserID || taskHidden(hiddenTaskIDs, task.ID)) {
 			continue
 		}
 		for i := range task.Images {
@@ -1156,12 +1218,12 @@ func (s *Server) callUpstream(settings AdminSettings, task *GenerationTask, inpu
 
 func (s *Server) callUpstreamCodexCLIConcurrent(settings AdminSettings, task *GenerationTask, inputImages []string, maskDataURL string, n int) ([]string, map[string]any, []map[string]any, []string, string, []TaskTiming, error) {
 	results := make([]struct {
-		images  []string
-		actual  map[string]any
-		revised []string
+		images   []string
+		actual   map[string]any
+		revised  []string
 		endpoint string
-		timings []TaskTiming
-		err     error
+		timings  []TaskTiming
+		err      error
 	}, n)
 	var wg sync.WaitGroup
 
@@ -1178,12 +1240,12 @@ func (s *Server) callUpstreamCodexCLIConcurrent(settings AdminSettings, task *Ge
 			taskCopy.Params = paramsCopy
 			images, actual, _, revised, endpoint, timings, err := s.callUpstreamImages(settings, &taskCopy, inputImages, maskDataURL)
 			results[idx] = struct {
-				images  []string
-				actual  map[string]any
-				revised []string
+				images   []string
+				actual   map[string]any
+				revised  []string
 				endpoint string
-				timings []TaskTiming
-				err     error
+				timings  []TaskTiming
+				err      error
 			}{images: images, actual: actual, revised: revised, endpoint: endpoint, timings: timings, err: err}
 		}(i)
 	}
@@ -1682,6 +1744,26 @@ func sanitizedImageRefs(taskID string, images []GeneratedImage) []GeneratedImage
 		refs = append(refs, GeneratedImage{ID: taskImageID(taskID, i, image)})
 	}
 	return refs
+}
+
+func hiddenTaskSetForUser(user *User) map[string]struct{} {
+	set := make(map[string]struct{})
+	if user == nil {
+		return set
+	}
+	for _, id := range user.HiddenTaskIDs {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		set[id] = struct{}{}
+	}
+	return set
+}
+
+func taskHidden(hiddenTaskIDs map[string]struct{}, taskID string) bool {
+	_, ok := hiddenTaskIDs[taskID]
+	return ok
 }
 
 func generatedImageID(taskID string, idx int) string {

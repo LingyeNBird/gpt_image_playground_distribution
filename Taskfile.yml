@@ -52,8 +52,7 @@ tasks:
     desc: 触发 GitHub Actions Docker 构建并持续观察运行状态
     cmds:
       - gh workflow run {{.DOCKER_WORKFLOW}} --repo {{.GITHUB_REPO}} --ref main
-      - powershell -NoProfile -Command "Start-Sleep -Seconds 5"
-      - gh run watch --repo {{.GITHUB_REPO}} $(gh run list --repo {{.GITHUB_REPO}} --workflow {{.DOCKER_WORKFLOW}} --limit 1 --json databaseId --jq '.[0].databaseId')
+      - node ./scripts/watch-latest-gh-run.mjs {{.GITHUB_REPO}} {{.DOCKER_WORKFLOW}} 5
 
   release:publish:
     desc: 触发 GitHub Actions 构建发布二进制与前端静态资源
@@ -65,13 +64,12 @@ tasks:
     desc: 触发发布资源构建并持续观察 GitHub Actions 运行状态
     cmds:
       - gh workflow run {{.RELEASE_WORKFLOW}} --repo {{.GITHUB_REPO}} --ref main
-      - powershell -NoProfile -Command "Start-Sleep -Seconds 5"
-      - gh run watch --repo {{.GITHUB_REPO}} $(gh run list --repo {{.GITHUB_REPO}} --workflow {{.RELEASE_WORKFLOW}} --limit 1 --json databaseId --jq '.[0].databaseId')
+      - node ./scripts/watch-latest-gh-run.mjs {{.GITHUB_REPO}} {{.RELEASE_WORKFLOW}} 5
 
   up:
-    desc: 本地构建并启动或重建 Compose 服务
+    desc: 使用当前镜像启动或重建 Compose 服务
     cmds:
-      - docker compose up -d --build
+      - docker compose up -d
 
   up:local:
     desc: 使用 docker-compose.local.yml 的本地镜像启动或重建服务
@@ -118,7 +116,7 @@ tasks:
   admin-key:
     desc: 如果日志中仍存在，则显示容器里的管理员密钥
     cmds:
-      - powershell -NoProfile -Command "docker logs {{.SERVICE}} 2>&1 | Select-String 'initial admin key'"
+      - node ./scripts/show-admin-key.mjs {{.SERVICE}}
 
   clean:image:
     desc: 删除本地 Docker 镜像
