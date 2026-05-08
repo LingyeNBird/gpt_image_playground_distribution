@@ -74,10 +74,19 @@ export default function AdminPanel() {
     }
   }
 
+  const loadRecords = useCallback(async () => {
+    try {
+      const payload = await apiRequest<{ tasks: AdminTaskRecord[] }>('/api/admin/tasks')
+      setRecords(payload.tasks ?? [])
+    } catch {
+      setRecords([])
+    }
+  }, [])
+
   const load = async () => {
     await Promise.all([
       loadUsers(),
-      apiRequest<{ tasks: AdminTaskRecord[] }>('/api/admin/tasks').then((payload) => setRecords(payload.tasks ?? [])).catch(() => setRecords([])),
+      loadRecords(),
       apiRequest<{ buckets: Bucket[] }>('/api/admin/buckets').then((b) => setBuckets(b.buckets ?? [])).catch(() => setBuckets([])),
       apiRequest<{ failures: Failure[] }>('/api/admin/failures').then((f) => setFailures(f.failures ?? [])).catch(() => setFailures([])),
       refreshAudit().catch(() => { setAudit([]); setAuditHasMore(false) }),
@@ -85,6 +94,15 @@ export default function AdminPanel() {
   }
 
   useEffect(() => { void load() }, [])
+
+  useEffect(() => {
+    if (tab !== 'records') return
+    void loadRecords()
+    const timer = window.setInterval(() => {
+      void loadRecords()
+    }, 5000)
+    return () => window.clearInterval(timer)
+  }, [tab, loadRecords])
 
   const showToast = (text: string, error: unknown = null) => {
     setToast({ id: Date.now(), type: toastTypeForError(error), text })

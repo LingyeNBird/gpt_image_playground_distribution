@@ -26,9 +26,24 @@ export default function SettingsModal() {
   const [message, setMessage] = useState<{ type: 'success' | 'error' | 'info'; text: string } | null>(null)
   const [testing, setTesting] = useState<'url' | 'key' | null>(null)
 
+  const preferredDeliveryMode = currentUser?.role === 'admin'
+    ? settings.deliveryMode
+    : currentUser?.allowDirect === false && currentUser?.allowBucket === true
+      ? 'bucket'
+      : currentUser?.allowBucket === false && currentUser?.allowDirect !== false
+        ? 'direct'
+        : settings.deliveryMode
+
   useEffect(() => {
-    if (showSettings) setDeliveryMode(settings.deliveryMode)
-  }, [showSettings, settings.deliveryMode])
+    if (showSettings) setDeliveryMode(preferredDeliveryMode)
+  }, [showSettings, preferredDeliveryMode])
+
+  useEffect(() => {
+    if (!showSettings || currentUser?.role === 'admin') return
+    if (deliveryMode !== preferredDeliveryMode) {
+      setDeliveryMode(preferredDeliveryMode)
+    }
+  }, [currentUser?.role, deliveryMode, preferredDeliveryMode, showSettings])
 
   useEffect(() => {
     if (!showSettings || currentUser?.role !== 'admin') return

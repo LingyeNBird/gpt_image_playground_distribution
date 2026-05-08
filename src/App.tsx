@@ -23,6 +23,7 @@ export default function App() {
   const setSettings = useStore((s) => s.setSettings)
   const setCurrentUser = useStore((s) => s.setCurrentUser)
   const setShowSettings = useStore((s) => s.setShowSettings)
+  const settings = useStore((s) => s.settings)
   const currentUser = useStore((s) => s.currentUser)
   const authChecked = useStore((s) => s.authChecked)
   const [pathname, setPathname] = useState(() => window.location.pathname)
@@ -97,6 +98,19 @@ export default function App() {
     window.addEventListener(AUTH_INVALIDATED_EVENT, handleAuthInvalidated)
     return () => window.removeEventListener(AUTH_INVALIDATED_EVENT, handleAuthInvalidated)
   }, [setCurrentUser, setShowSettings])
+
+  useEffect(() => {
+    if (!currentUser || currentUser.role === 'admin') return
+
+    if (settings.deliveryMode === 'direct' && currentUser.allowDirect === false && currentUser.allowBucket === true) {
+      setSettings({ deliveryMode: 'bucket' })
+      return
+    }
+
+    if (settings.deliveryMode === 'bucket' && currentUser.allowBucket === false && currentUser.allowDirect !== false) {
+      setSettings({ deliveryMode: 'direct' })
+    }
+  }, [currentUser, settings.deliveryMode, setSettings])
 
   useEffect(() => {
     if (!authChecked) return
