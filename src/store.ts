@@ -118,6 +118,15 @@ function syncTaskIntoVisibleStore(task: TaskRecord, replacedTaskId?: string) {
   })
 }
 
+async function hydrateTasksForCurrentUser(currentUser: CurrentUser | null) {
+  await loadLocalTasksForUser(currentUser)
+  if (!currentUser) return
+  void resumeRunningTasks()
+  void syncBackendTasksToLocal(currentUser)
+    .then(() => loadLocalTasksForUser(currentUser))
+    .catch(() => undefined)
+}
+
 async function loadLocalTasksForUser(user: CurrentUser | null): Promise<void> {
   const tasks = await getAllTasks()
   const hiddenTaskIds = getHiddenTaskIdsForUser(user)
@@ -176,13 +185,9 @@ async function syncBackendTasksToLocal(user: CurrentUser): Promise<void> {
 
     const result = backendTaskToResult(backendTask)
     const outputImages: string[] = []
-    const outputImageUrls: Record<string, string> = {}
 
     for (const imageId of result.images) {
-      const imageUrl = backendTaskImageUrl(imageId)
-      imageCache.set(imageId, imageUrl)
       outputImages.push(imageId)
-      outputImageUrls[imageId] = imageUrl
     }
 
     const actualParamsByImage = result.actualParamsList?.reduce<Record<string, Partial<TaskParams>>>((acc, params, index) => {
@@ -206,7 +211,7 @@ async function syncBackendTasksToLocal(user: CurrentUser): Promise<void> {
       revisedPromptByImage: revisedPromptByImage && Object.keys(revisedPromptByImage).length > 0 ? revisedPromptByImage : undefined,
       inputImageIds: [],
       outputImages,
-      outputImageUrls,
+      outputImageUrls: {},
       backendTaskId: backendTask.id,
       deliveryMode: backendTask.mode,
       status: backendTask.status,
@@ -232,11 +237,7 @@ async function pollBackendTaskUntilSettled(taskId: string): Promise<void> {
 
   const result = backendTaskToResult(latestBackendTask)
   const outputIds: string[] = []
-  const outputImageUrls: Record<string, string> = {}
   for (const imageId of result.images) {
-    const imageUrl = backendTaskImageUrl(imageId)
-    imageCache.set(imageId, imageUrl)
-    outputImageUrls[imageId] = imageUrl
     outputIds.push(imageId)
   }
 
@@ -253,7 +254,7 @@ async function pollBackendTaskUntilSettled(taskId: string): Promise<void> {
 
   updateTaskInStore(taskId, {
     outputImages: outputIds,
-    outputImageUrls,
+    outputImageUrls: {},
     actualParams: { ...result.actualParams, n: outputIds.length },
     actualParamsByImage: actualParamsByImage && Object.keys(actualParamsByImage).length > 0 ? actualParamsByImage : undefined,
     revisedPromptByImage: revisedPromptByImage && Object.keys(revisedPromptByImage).length > 0 ? revisedPromptByImage : undefined,
@@ -357,7 +358,7 @@ export const useStore = create<AppState>()(
       currentUser: null,
       setCurrentUser: (currentUser) => {
         set({ currentUser, tasks: [], selectedTaskIds: [], detailTaskId: null, lightboxImageId: null, lightboxImageList: [] })
-        void loadLocalTasksForUser(currentUser)
+        void hydrateTasksForCurrentUser(currentUser)
       },
       authChecked: false,
       setAuthChecked: (authChecked) => set({ authChecked }),
@@ -722,11 +723,7 @@ async function executeTask(taskId: string) {
 
     // 更新输出图片 id，并通过独立接口按需加载图像数据
     const outputIds: string[] = []
-    const outputImageUrls: Record<string, string> = {}
     for (const imageId of result.images) {
-      const imageUrl = backendTaskImageUrl(imageId)
-      imageCache.set(imageId, imageUrl)
-      outputImageUrls[imageId] = imageUrl
       outputIds.push(imageId)
     }
     const actualParamsByImage = result.actualParamsList?.reduce<Record<string, Partial<TaskParams>>>((acc, params, index) => {
@@ -755,7 +752,7 @@ async function executeTask(taskId: string) {
     // 更新任务
     updateTaskInStore(taskId, {
       outputImages: outputIds,
-      outputImageUrls,
+      outputImageUrls: {},
       actualParams: { ...result.actualParams, n: outputIds.length },
       actualParamsByImage: actualParamsByImage && Object.keys(actualParamsByImage).length > 0 ? actualParamsByImage : undefined,
       revisedPromptByImage: revisedPromptByImage && Object.keys(revisedPromptByImage).length > 0 ? revisedPromptByImage : undefined,
