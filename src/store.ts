@@ -609,13 +609,19 @@ export async function submitTask(options: { allowFullMask?: boolean } = {}) {
     elapsed: null,
   }
 
-  const backendTask = await submitBackendTask({
-    settings,
-    prompt: task.prompt,
-    params: task.params,
-    inputImageDataUrls: orderedInputImages.map((img) => img.dataUrl),
-    maskDataUrl: maskDraft?.maskDataUrl,
-  })
+  let backendTask
+  try {
+    backendTask = await submitBackendTask({
+      settings,
+      prompt: task.prompt,
+      params: task.params,
+      inputImageDataUrls: orderedInputImages.map((img) => img.dataUrl),
+      maskDataUrl: maskDraft?.maskDataUrl,
+    })
+  } catch (err) {
+    showToast(err instanceof Error ? err.message : String(err), 'error')
+    return
+  }
 
   const persistedTask: TaskRecord = {
     ...task,
